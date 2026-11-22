@@ -8,7 +8,7 @@ import { Emitter } from '../core/events';
 import { getAssetUrl } from '../core/assets';
 import type { ChangeHint, Store } from '../core/store';
 import type {
-    AnimationDoc, AssetMeta, EnvironmentDoc, GeometryDoc, GrassDoc, RainDoc, InstancingDoc, LightDoc, LightType, MaterialDoc, MeshDoc, ModelDoc, NodeDoc, ParticlesDoc, ScatterDoc, TerrainDoc,
+    AnimationDoc, AssetMeta, EnvironmentDoc, GeometryDoc, GrassDoc, RainDoc, InstancingDoc, LightDoc, LightType, MaterialDoc, MeshDoc, ModelDoc, MotionDoc, NodeDoc, ParticlesDoc, ScatterDoc, TerrainDoc,
     TextureRole, TreeDoc,
 } from '../core/types';
 import { decompose, type Vec3 } from '../core/math';
@@ -38,9 +38,13 @@ import { objectWorldBox, RAIN_SHADER, RainVolume } from './rain';
 import type { MaterialLayer } from './terrainMaterial';
 import { CapsuleGeometry, ConeGeometry, RampGeometry, StairsGeometry } from './shapes';
 import {
-    applyAlpha, applyPBR, applyUVTransform, BASE_MAP, createBuiltinMaterial, engineAlpha, MaterialMaps, normalizeModelMaterials, PBR_MAPS,
+    ANIME_PBR_MAPS, applyAlpha, applyPBR, applyUVTransform, BASE_MAP, createBuiltinMaterial, engineAlpha, isTransparent, MaterialMaps, normalizeModelMaterials, PBR_MAPS,
 } from './materials';
+import { ANIME_MAPS, animeMapAssets, animeOutlined, applyAnime, createAnimeMaterial, setAnimeCutout } from './animeMaterial';
+import { resolveAnime } from '../core/anime';
 import { cloneMaterial, inspectModel, ModelInfo, ModelOverrides } from './modelParts';
+import { CharacterMotion } from './characterMotion';
+import { AnimeHeadFrame, findHeadJoint } from './animeHead';
 import type { Runtime } from './runtime';
 import { applyProps, type ShaderManager } from './shaders';
 
@@ -57,6 +61,10 @@ interface ModelState {
     key: string;
     /** The clip the editor last played. */
     clip?: string;
+    /** What moves its skeleton on top of the clip (NodeDoc.motion): springs and the face. */
+    motion?: CharacterMotion;
+    /** What turns its anime materials with the head bone each frame. */
+    head?: AnimeHeadFrame;
     /** The instancing group whose copy of the file's materials it shows ('' for the file's own). */
     group: string;
     /** Lets go of the group's copy it was made from. */
@@ -756,6 +764,7 @@ export class SceneSync extends Emitter<SyncEvents> {
         this.applyLight(entry, node.light);
         this.applyModel(entry, node.model);
         this.applyAnimation(entry, node.animation);
+        this.applyMotion(entry, node.motion);
         this.applyParticles(entry, node.particles);
         this.applyMirror(entry, node);
         this.applyGrass(entry, node.grass);
@@ -908,7 +917,12 @@ export class SceneSync extends Emitter<SyncEvents> {
 
     private materialKind(entry: Entry, md: MaterialDoc): string {
         // A mirror with a built-in material shows the reflection, tinted by its color.
-        if (md.type !== 'shader') return this.store.node(entry.id)?.mirror ? 'mirror' : md.type;
+        if (md.type !== 'shader') {
+            if (this.store.node(entry.id)?.mirror) return 'mirror';
+            // An anime material with an outline has a second pass: another material than one without.
+            if (md.type === 'anime') return animeOutlined(resolveAnime(md.anime), isTransparent(engineAlpha(md.alphaMode, clamp01(md.opacity)))) ? 'anime+outline' : 'anime';
+            return md.type;
+        }
         const id = md.shader;
         if (id && this.shaders.isValid(id)) return `shader:${id}:${this.shaders.version(id)}`;
         // While a first version compiles, keep the current look, or show a
@@ -940,6 +954,7 @@ export class SceneSync extends Emitter<SyncEvents> {
             if (!mat) {
                 if (kind === 'shader-missing') mat = errorMaterial(ctx);
                 else if (kind === 'mirror') mat = new MirrorMaterial(ctx);
+                else if (kind === 'anime' || kind === 'anime+outline') mat = createAnimeMaterial(ctx, kind === 'anime+outline');
                 else mat = createBuiltinMaterial(kind === 'unlit' || kind === 'lambert' ? kind : 'lit', ctx);
             }
             rec = { key, kind, material: mat, maps: new MaterialMaps(mat, ctx, (id, role) => this.loadTexture(id, role)), paramAssets: {}, users: 0, group };
@@ -988,8 +1003,18 @@ export class SceneSync extends Emitter<SyncEvents> {
         }
         const opacity = clamp01(md.opacity);
         mat.baseColor = hexToColor(md.color, opacity);
+        const anime = kind === 'anime' || kind === 'anime+outline';
         if (mat instanceof LitMaterial) {
             applyPBR(mat, md);
+        } else if (anime) {
+            // Cel shading over the lit material's own values and maps.
+            const sh = mat.shader;
+            sh.setUniformFloat('metallic', clamp01(md.metallic));
+            sh.setUniformFloat('roughness', clamp01(md.roughness));
+            sh.setUniformColor('emissiveColor', hexToColor(md.emissive));
+            sh.setUniformFloat('emissiveIntensity', Math.max(0, md.emissiveIntensity));
+            sh.setUniformFloat('normalScale', Math.max(0, md.normalScale ?? 1));
+            applyAnime(mat, resolveAnime(md.anime), isTransparent(engineAlpha(md.alphaMode, opacity)));
         } else if (kind.startsWith('shader:')) {
             const sh = mat.shader;
             sh.setUniformFloat('metallic', clamp01(md.metallic));
@@ -1006,15 +1031,19 @@ export class SceneSync extends Emitter<SyncEvents> {
             }
         }
         mat.doubleSide = !!md.doubleSide;
-        applyAlpha(mat, engineAlpha(md.alphaMode, opacity), clamp01(md.alphaCutoff ?? 0.5));
+        const alpha = engineAlpha(md.alphaMode, opacity);
+        applyAlpha(mat, alpha, clamp01(md.alphaCutoff ?? 0.5));
+        if (anime) setAnimeCutout(mat, alpha === 'MASK');
         applyUVTransform(mat, md.tiling, md.offset);
 
-        for (const map of mat instanceof LitMaterial ? PBR_MAPS : [BASE_MAP]) rec.maps.set(map, md[map.key] ?? null);
+        for (const map of mat instanceof LitMaterial ? PBR_MAPS : anime ? ANIME_PBR_MAPS : [BASE_MAP]) rec.maps.set(map, md[map.key] ?? null);
+        if (anime) for (const { map, asset } of animeMapAssets(md.anime)) rec.maps.set(map, asset);
     }
 
     private applyLight(entry: Entry, light: LightDoc | undefined) {
         if (!light) {
             if (entry.light) {
+                this.runtime.untrackLight(entry.light);
                 entry.obj.removeComponent(LIGHT_CLASSES[entry.lightType!]);
                 entry.light = null;
                 entry.lightType = null;
@@ -1023,8 +1052,12 @@ export class SceneSync extends Emitter<SyncEvents> {
             return;
         }
         if (entry.lightType !== light.type) {
-            if (entry.light) entry.obj.removeComponent(LIGHT_CLASSES[entry.lightType!]);
+            if (entry.light) {
+                this.runtime.untrackLight(entry.light);
+                entry.obj.removeComponent(LIGHT_CLASSES[entry.lightType!]);
+            }
             entry.light = entry.obj.addComponent(LIGHT_CLASSES[light.type]);
+            this.runtime.trackLight(entry.light);
             entry.lightType = light.type;
             entry.lightKey = '';
             if (!entry.visible) entry.light.enable = false;
@@ -1104,6 +1137,8 @@ export class SceneSync extends Emitter<SyncEvents> {
                     state.overrides = null;
                 }
                 this.applyAnimation(entry, this.store.node(entry.id)?.animation);
+                this.applyMotion(entry, this.store.node(entry.id)?.motion);
+                this.applyHeadFrame(entry);
                 this.setEnabled(entry, entry.visible, true);
                 this.runtime.gi.invalidate();
                 // Its group draws it with the others, and a field of grass or a scatter may stand on it.
@@ -1134,6 +1169,34 @@ export class SceneSync extends Emitter<SyncEvents> {
         a.timeScale = preview ? (doc?.speed ?? 1) : 0;
     }
 
+    /** The springs and the face of a model's skeleton, running after its clip in the editor and in Play alike. */
+    private applyMotion(entry: Entry, doc: MotionDoc | undefined) {
+        const st = entry.model;
+        const a = st?.info?.skeleton ?? null;
+        if (!st) return;
+        if (!doc || !a) {
+            st.motion?.dispose();
+            st.motion = undefined;
+            return;
+        }
+        if (st.motion) st.motion.update(doc);
+        else st.motion = new CharacterMotion(a, doc);
+    }
+
+    /** Turns a model's anime materials with its head bone, once it is loaded (a model without a skinned head has none). */
+    private applyHeadFrame(entry: Entry) {
+        const st = entry.model;
+        const a = st?.info?.skeleton ?? null;
+        if (!st?.info || !a || st.head) return;
+        const skins = st.info.parts
+            .map((p) => p.renderer)
+            .filter((r): r is SkinnedMeshRenderer2 => r instanceof SkinnedMeshRenderer2 && !!r.skinJointsName && !!r.skinInverseBindMatrices)
+            .map((r) => ({ joints: r.skinJointsName, inverseBinds: r.skinInverseBindMatrices }));
+        const head = findHeadJoint(skins);
+        if (!head) return;
+        st.head = new AnimeHeadFrame(a, head, () => st.overrides?.animeMaterials() ?? []);
+    }
+
     private applyModelOverrides(entry: Entry, model: ModelDoc) {
         const st = entry.model;
         if (!st?.overrides) return;
@@ -1152,6 +1215,10 @@ export class SceneSync extends Emitter<SyncEvents> {
         if (!m) return;
         m.token = -1;
         m.overrides?.dispose();
+        m.motion?.dispose();
+        m.motion = undefined;
+        m.head?.dispose();
+        m.head = undefined;
         m.release?.();
         m.release = undefined;
         if (entry.group) this.dirtyGroups.add(entry.group);
@@ -2327,7 +2394,8 @@ export class SceneSync extends Emitter<SyncEvents> {
                     tex = new CompressedTexture2D(this.runtime.engine.context3D, role === 'color' ? 'srgb' : 'linear');
                     tex.name = meta.name;
                     tex.maxSize = this.textureMaxSize;
-                    tex.maxAnisotropy = QUALITY[this.runtime.qualityLevel].anisotropy;
+                    // A lookup is read as it is, as its maker sampled it.
+                    tex.maxAnisotropy = role === 'lookup' ? 1 : QUALITY[this.runtime.qualityLevel].anisotropy;
                     // Known before it has data, so a refresh meanwhile runs after this fill.
                     this.assetTextures.set(key, tex);
                 }

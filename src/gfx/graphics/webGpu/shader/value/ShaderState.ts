@@ -11,6 +11,8 @@ export class ShaderState {
     public depthWriteEnabled?: boolean = true;
     public frontFace?: GPUFrontFace = `ccw`;
     public cullMode?: GPUCullMode = GPUCullMode.back;
+    /** The faces the shadow passes made from this color pass draw; unset, the same as `cullMode`. */
+    public shadowCullMode?: GPUCullMode;
     public topology?: GPUPrimitiveTopology = GPUPrimitiveTopology.triangle_list;
     public depthBias?: number = 0;
     public depthBiasSlopeScale?: number = 0;

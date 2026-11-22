@@ -9,10 +9,6 @@ export let VertexAttributes: string = /*wgsl*/ `
         @location(auto) uv: vec2<f32>,
         @location(auto) TEXCOORD_1: vec2<f32>,
 
-        #if USE_TANGENT
-            @location(auto) TANGENT: vec4<f32>,
-        #endif
-
         #if USE_SKELETON || USE_METAHUMAN
             @location(auto) joints0: vec4<f32>,
             @location(auto) weights0: vec4<f32>,
@@ -24,6 +20,19 @@ export let VertexAttributes: string = /*wgsl*/ `
 
         #if USE_MORPHTARGETS || USE_METAHUMAN
             @location(auto) vIndex: f32,
+        #endif
+
+        // The attributes only some passes of a material read come last, and a
+        // geometry lays its vertex buffers out by location: one declared before
+        // the joints would move them a slot on in the passes that read it, and
+        // the others would read the wrong data where they expect joints. The
+        // tangent is read by color passes, not by shadow and depth passes;
+        // the outline normal by a hull alone.
+        #if USE_TANGENT
+            @location(auto) TANGENT: vec4<f32>,
+        #endif
+        #if USE_OUTLINE_NORMAL
+            @location(auto) outlineNormal: vec4<f32>,
         #endif
     }
 `

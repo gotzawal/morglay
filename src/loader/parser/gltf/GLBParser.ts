@@ -3,7 +3,7 @@ import { ParserBase } from '../ParserBase';
 import { ParserFormat } from '../ParserFormat';
 import { GLTF_Info } from './GLTFInfo';
 import { GLTFSubParser } from './GLTFSubParser';
-import { assertSupportedGltfExtensions, preferredImages } from './GLTFExtensions';
+import { assertSupportedGltfExtensions, colorImages, preferredImages } from './GLTFExtensions';
 import { isKTX2Image } from '../../../textures/ktx2/KTX2Container';
 
 /**
@@ -63,19 +63,9 @@ export class GLBParser extends ParserBase {
             return false;
         }
 
-        // let time = performance.now();
-        let gltfJSON = '';
-        let maxCount = 65535;
-        let chunkJSONData = chunks[0].chunkData;
-        for (let i = 0; i < chunkJSONData.length; i += maxCount) {
-            let count = chunkJSONData.length - i;
-            count = Math.min(count, maxCount);
-            let newUint = chunkJSONData.subarray(i, i + count);
-            gltfJSON += String.fromCharCode(...newUint);
-        }
-        // console.log(performance.now() - time);
-
-        // let gltfJSON = String.fromCharCode(...chunks[0].chunkData) ;//.apply(null, chunks[0].chunkData);
+        // The JSON chunk is UTF-8 (glTF 2.0): names in other scripts (a Japanese
+        // bone, a Chinese material) are more than one byte a character.
+        let gltfJSON = new TextDecoder('utf-8').decode(chunks[0].chunkData);
         let obj = JSON.parse(gltfJSON) as object;
         this._gltf = new GLTF_Info();
         this._gltf = { ...this._gltf, ...obj };
@@ -122,15 +112,17 @@ export class GLBParser extends ParserBase {
 
     /**
      * Decode the images the textures prefer from the binary chunk, keyed by
-     * image index (names may repeat or be missing). KTX2 images, fallback
-     * sources and images that fail here are left to
+     * image index and color space (names may repeat or be missing): an image
+     * the materials read only as a color in sRGB, any other as data. KTX2
+     * images, fallback sources and images that fail here are left to
      * GLTFSubParser.parseTexture, which decodes or transcodes them when a
-     * texture needs them.
+     * texture needs them (also an image wanted in the other color space).
      */
     private async preloadImages() {
         const images = this._gltf.images;
         if (!images) return;
         const preferred = preferredImages(this._gltf);
+        const colors = colorImages(this._gltf);
         for (let i = 0; i < images.length; i++) {
             const image = images[i];
             if (image.bufferView === undefined || isKTX2Image(image) || !preferred.has(i)) continue;
@@ -139,7 +131,8 @@ export class GLBParser extends ParserBase {
             const buffer = view && this._gltf.buffers[view.buffer];
             if (!buffer?.dbuffer) continue;
             const data = new Uint8Array(buffer.dbuffer, view.byteOffset || 0, view.byteLength);
-            const dtexture = new BitmapTexture2D(true, this.ctx);
+            const colorSpace = colors.has(i) ? 'srgb' : 'linear';
+            const dtexture = new BitmapTexture2D(true, this.ctx, colorSpace);
             try {
                 await dtexture.loadFromBlob(new Blob([data], { type: image.mimeType }));
             } catch (e) {
@@ -147,7 +140,7 @@ export class GLBParser extends ParserBase {
                 continue;
             }
             dtexture.name = image.name;
-            this._gltf.resources['image_' + i] = dtexture;
+            this._gltf.resources[`image_${i}:${colorSpace}`] = dtexture;
             this._gltf.resources[image.name] ??= dtexture;
         }
     }

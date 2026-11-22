@@ -15,6 +15,8 @@ export type TonemapSetting = {
     exposure: number;
     /** Curve selector. 'ACES' applies the Filmic Narkowicz fit;
      *  'None' is straight passthrough (same effect as enable=false
-     *  but keeps exposure scaling). */
-    mode: 'ACES' | 'None';
+     *  but keeps exposure scaling); 'Display' takes the scene as display
+     *  (sRGB-encoded) colors that materials wrote themselves and decodes
+     *  them, so the sRGB swapchain shows them as written. */
+    mode: 'ACES' | 'None' | 'Display';
 };

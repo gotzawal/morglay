@@ -36,9 +36,16 @@ export class LitMaterial extends Material {
     /** Clone this material into a new LitMaterial, copying PBR uniforms and textures. */
     public clone(): Material {
         let litMaterial = new LitMaterial();
+        // The copy keeps the material's name and how it draws (double sided,
+        // cut-out or blended, its place in the queue), not only its values:
+        // the glTF loader gives every skinned mesh a copy, and hair cards
+        // or lashes lost their sides and alpha with it.
+        litMaterial.name = this.name;
+        litMaterial._alphaMode = this._alphaMode;
 
         let colorPass = litMaterial.shader.getDefaultColorShader();
         let sourceShader = this.shader.getDefaultColorShader();
+        Object.assign(colorPass.shaderState, sourceShader.shaderState);
         colorPass.defineValue = { ...sourceShader.defineValue }
         colorPass.setUniform(`shadowBias`, sourceShader.getUniform(`shadowBias`));
 

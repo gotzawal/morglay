@@ -11,6 +11,7 @@ export default defineConfig({
         alias: {
             // The engine needs WebGPU; the logic under test only names its classes.
             '@orillusion/core': here('./test/unit/engine.stub.ts'),
+            'virtual:morglay-shading-pack': here('./test/unit/shadingPack.stub.ts'),
         },
     },
     test: {

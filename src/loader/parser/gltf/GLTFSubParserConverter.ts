@@ -403,7 +403,13 @@ export class GLTFSubParserConverter {
 
                     const skeletonNode = this.gltf.nodes[skinSkeletonId!];
                     if (skeletonNode.dnode && skeletonNode.dnode['nodeObj']) {
-                        this.convertSkeletonAnim(node, nodeInfo.skin);
+                        // The skeleton's node came before this mesh (a file that lists
+                        // its bones first, then its meshes): the animator belongs on
+                        // that node, once, for every mesh of the skeleton. Putting one
+                        // on each mesh node gave a model of twelve parts twelve
+                        // animators, each with its own copy of the pose.
+                        const skeletonObj = skeletonNode.dnode['nodeObj'] as Object3D;
+                        if (!skeletonObj.getComponent(AnimatorComponent)) this.convertSkeletonAnim(skeletonObj, nodeInfo.skin);
                     } else {
                         if (!skeletonNode.dnode) skeletonNode.dnode = {};
                         // Multiple skins can share the same skeleton root
@@ -559,6 +565,23 @@ export class GLTFSubParserConverter {
             acc.normalize = false;
         }
 
+        // The hull normal reaches the shader as four numbers, the fourth
+        // reserved (1: widths are painted in the outline map); a file may give
+        // three, and an older `_OUTLINE_NORMAL` has nothing there: 1.
+        const hull = attribArrays[VertexAttributeName.outlineNormal];
+        if (hull?.data && hull.numComponents === 3) {
+            const count = hull.data.length / 3;
+            const wide = new Float32Array(count * 4);
+            for (let i = 0; i < count; i++) {
+                wide.set(hull.data.subarray(i * 3, i * 3 + 3), i * 4);
+                wide[i * 4 + 3] = 1;
+            }
+            hull.data = wide;
+            hull.numComponents = 4;
+        } else if (hull?.data && hull.numComponents === 4 && hull.outlineWithoutWidth) {
+            for (let i = 3; i < hull.data.length; i += 4) hull.data[i] = 1;
+        }
+
         // Morph targets go by the names the file gives them (the mesh's extras.targetNames, which
         // glTF leaves optional), or else by their index.
         let targetNames: string[] = primitive.targetNames;
@@ -588,7 +611,8 @@ export class GLTFSubParserConverter {
                 propertyData.shapeIndex = blendShapeData.shapeIndexs[i];
                 propertyData.frameCount = 1;
                 propertyData.blendPositionList = attribArrays[GLTFType.MORPH_POSITION_PREFIX + i].data;
-                propertyData.blendNormalList = attribArrays[GLTFType.MORPH_NORMAL_PREFIX + i].data;
+                // glTF leaves a target's NORMAL optional: one that only moves positions has none.
+                propertyData.blendNormalList = attribArrays[GLTFType.MORPH_NORMAL_PREFIX + i]?.data ?? new Float32Array(0);
     
                 blendShapeData.blendShapePropertyDatas.push(propertyData);
                 blendShapeData.blendShapeMap.set(propertyData.shapeName, propertyData);

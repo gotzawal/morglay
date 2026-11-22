@@ -2,11 +2,14 @@ import type { z } from 'zod';
 import { PARTICLE_PRESETS, particleCount, presetParticles } from '../core/particles';
 import { defaultCharacter, defaultPlayer } from '../core/character';
 import {
-    Animation, ANIMATION_MODES, AudioSource, Body, Camera, Character, Grass, Instancing, Light, LightShadow, Material, Mirror, Particles, Player, Rain, Scatter, ScatterSource, Terrain,
-    TerrainLayer, Tree,
+    Anime, Animation, ANIMATION_MODES, AudioSource, Body, Camera, Character, CharacterInfo, Grass, Instancing, Light, LightShadow, Material, Mirror, Motion, Particles, Player, Rain, Scatter, ScatterSource, Terrain,
+    TerrainLayer, Tree, type CharacterInfoDoc,
 } from '../core/model';
+import { infoFromMeta } from '../core/mglEditor';
+import { ANIME_MAP_ROLES, compactAnime, guessAnimeKind, resolveAnime, type AnimeInput, type AnimeMapKey } from '../core/anime';
+import { libraryFor } from '../core/mglLibrary';
 import { SPECIES_HEIGHT, SPECIES_NAME, TREE_SPECIES, type TreeSpecies } from '../core/trees';
-import { defaults, inner } from '../core/schema';
+import { defaults, fieldMeta, inner } from '../core/schema';
 import type { Editor } from '../editor';
 import type { ChangeHint } from '../core/store';
 import { layerFromSlot, unassignSlot } from '../design/materialSlots';
@@ -17,7 +20,7 @@ import { formatBytes } from '../core/assets';
 import { defaultCameraDoc, defaultGeometry, defaultLight, defaultMaterial, defaultTree } from '../core/defaults';
 import { SCRIPT_TEMPLATES, SHADER_TEMPLATES } from '../core/templates';
 import type {
-    AlphaMode, AssetMeta, GeometryType, LightType, MaterialDoc, MaterialOverride, MaterialType, NodeDoc, ParamValue, PartOverride, ScatterSourceDoc, ScriptRef,
+    AlphaMode, AnimeDoc, AssetMeta, GeometryType, LightType, MaterialDoc, MaterialOverride, MaterialType, NodeDoc, ParamValue, PartOverride, ScatterSourceDoc, ScriptRef,
     SlotShading, TextureRole, TreeDoc, Vec3,
 } from '../core/types';
 import { MATERIAL_PRESETS } from '../core/materialPresets';
@@ -64,8 +67,25 @@ const MATERIAL_TYPES: { value: MaterialType; label: string; hint: string }[] = [
     { value: 'lit', label: 'Lit (PBR)', hint: 'Physically based: lights, shadows, reflections, clear coat, glass' },
     { value: 'unlit', label: 'Unlit', hint: 'Shows its color and texture as they are, ignoring lights' },
     { value: 'lambert', label: 'Lambert (Matte)', hint: 'Cheap matte shading from directional lights, no specular or shadows' },
+    { value: 'anime', label: 'Anime (Cel)', hint: 'Cel shading for characters: light and shade with a clean edge, a rim, an outline' },
     { value: 'shader', label: 'Custom Shader', hint: 'Renders with a WGSL material shader' },
 ];
+
+/** The rows of an anime material's cel shading, by group; which groups show depends on its kind. */
+const ANIME_ROWS = {
+    shade: ['shadeBrightness', 'shadeSaturation', 'shadeDarkness', 'shadeTint', 'shadeBias', 'step', 'feather', 'shadows', 'saturateLit'],
+    edge: ['edge', 'edgeColor', 'edgeMasked'],
+    light: ['light', 'lightTint', 'toneCurve'],
+    highlight: ['highlight', 'reflectance', 'specular'],
+    outline: ['outline', 'outlineDepth', 'outlineBrightness', 'outlineSaturation', 'outlineLit', 'outlineNormals'],
+    hair: ['hair', 'hairShift', 'hairShift2', 'hairFacing', 'hairColor2', 'hairPower2', 'hairTilt'],
+    strands: ['hairStrand', 'hairStrandMix', 'hairComb', 'hairStrandShift', 'hairStrandPower', 'hairStrandSaturation', 'hairRepeat', 'hairOffset'],
+    eye: ['irisCircle', 'irisTint', 'irisAlphaTint', 'irisBulge', 'irisParallax', 'alphaDarken'],
+    matcap: ['matcap', 'matcapColor'],
+    head: ['front', 'up', 'frontTilt'],
+    /** How the model's own maps are laid out. */
+    layout: ['normalLayout', 'normalScale2', 'maskLayout'],
+} as const;
 
 const ALPHA_MODES: { value: AlphaMode; label: string }[] = [
     { value: 'auto', label: 'Auto' },
@@ -82,6 +102,7 @@ const SLOT_SHADING: { value: string; label: string }[] = [
     { value: 'model', label: 'Model (PBR)' },
     { value: 'unlit', label: 'Unlit' },
     { value: 'lambert', label: 'Lambert (Matte)' },
+    { value: 'anime', label: 'Anime (Cel)' },
     { value: 'shader', label: 'Custom Shader' },
 ];
 
@@ -106,6 +127,8 @@ const COMPONENTS = {
     audio: [AudioSource, (n: NodeDoc) => n.audio],
     // Made on the first edit: every model with clips shows the section.
     animation: [Animation, (n: NodeDoc) => n.animation, 'animation'],
+    // Made on the first edit too: every model with a skeleton shows it.
+    motion: [Motion, (n: NodeDoc) => n.motion, 'motion'],
 } as const;
 
 type Filter = (n: NodeDoc) => boolean;
@@ -242,7 +265,11 @@ export class InspectorPanel {
         return [
             n.id,
             this.store.selection.length,
-            n.mesh ? n.mesh.geometry.type + ':' + mat!.type + ':' + (mat!.alphaMode ?? '') + ':' + shaderId + ':' + this.propsKey(shaderId) : '-',
+            // An anime material shows the rows of its kind.
+            n.mesh
+                ? n.mesh.geometry.type + ':' + mat!.type + ':' + (mat!.alphaMode ?? '') + ':' + shaderId + ':' + this.propsKey(shaderId) + ':' +
+                  (mat!.type === 'anime' ? mat!.anime?.kind ?? 'cloth' : '')
+                : '-',
             // Shadow settings show while the light casts, the cascades with them.
             n.light ? n.light.type + (n.light.castShadow ? ':shadow:' + n.light.shadow?.coverage : '') : '-',
             n.particles ? 'fx:' + n.particles.shape : '-',
@@ -262,7 +289,11 @@ export class InspectorPanel {
             n.prefab ? this.prefabKey(n.prefab) : '-',
             n.model ? n.model.asset + ':' + (this.editor.sync.modelState(n.id)?.status ?? '') + ':' + (info ? info.parts.length : 0) : '-',
             n.model ? JSON.stringify(Object.keys(n.model.materials ?? {})) + JSON.stringify(Object.keys(n.model.parts ?? {})) : '',
-            n.model ? Object.values(n.model.materials ?? {}).map((o) => (o.shading ?? '') + (o.alphaMode ?? '') + (o.shader ?? '') + this.propsKey(o.shader ?? '')).join(',') : '',
+            n.model
+                ? Object.values(n.model.materials ?? {})
+                      .map((o) => (o.shading ?? '') + (o.alphaMode ?? '') + (o.shader ?? '') + this.propsKey(o.shader ?? '') + (o.anime?.kind ?? ''))
+                      .join(',')
+                : '',
             (n.scripts ?? []).map((r) => r.script + ':' + this.scriptKey(r.script)).join(','),
             this.agentKey(n),
             this.store.doc.assets.length,
@@ -689,7 +720,8 @@ export class InspectorPanel {
         const m = this.node.mesh!.material;
         const shaderDoc = m.type === 'shader' ? this.store.doc.shaders.find((s) => s.id === m.shader) : null;
         // Unlit and Lambert materials, and unlit shaders, ignore metallic, roughness and emission.
-        const lit = m.type === 'lit' || (m.type === 'shader' && shaderDoc?.lighting !== 'unlit');
+        const anime = m.type === 'anime';
+        const lit = m.type === 'lit' || anime || (m.type === 'shader' && shaderDoc?.lighting !== 'unlit');
         const pbr = m.type === 'lit';
         const set = <K extends keyof MaterialDoc>(key: K, label: string) =>
             this.hooks<MaterialDoc[K]>(
@@ -739,9 +771,9 @@ export class InspectorPanel {
         const map = this.textureSelect(m.map ?? null, textures, (v) => this.editor.applyTexture(v), 'color');
         rows.push(row('Texture', map.el, 'Base color map'), ...this.componentRows('material', ['tiling', 'offset']));
 
-        // PBR extras of the lit material.
+        // PBR extras of the lit material; the anime material reads the same maps.
         const maps: { set(md: MaterialDoc): void }[] = [];
-        if (pbr) {
+        if (pbr || anime) {
             rows.push(h('div', { class: 'group-label', text: 'Maps' }));
             const mapRow = (key: 'normalMap' | 'metalRoughMap' | 'aoMap' | 'emissiveMap', label: string, hint: string) => {
                 const f = this.textureSelect((m[key] as string | null | undefined) ?? null, textures, (v) => set(key, label).commit!(v), MAP_ROLES[key]);
@@ -751,10 +783,22 @@ export class InspectorPanel {
             mapRow('normalMap', 'Normal Map', 'Tangent space normal map');
             rows.push(...this.componentRows('material', ['normalScale']));
             mapRow('metalRoughMap', 'Metal / Rough', 'glTF metallic-roughness map: roughness in green, metallic in blue. Multiplies the sliders.');
-            mapRow('aoMap', 'Occlusion', 'Ambient occlusion map (red channel)');
+            mapRow('aoMap', 'Occlusion', anime ? 'Ambient occlusion map (red channel): dark places fall into shade sooner' : 'Ambient occlusion map (red channel)');
             mapRow('emissiveMap', 'Emission Map', 'Multiplied by the emissive color');
+        }
+        if (pbr) {
             rows.push(h('div', { class: 'group-label', text: 'Clear Coat' }), ...this.componentRows('material', ['clearcoat', 'clearcoatRoughness']));
             rows.push(h('div', { class: 'group-label', text: 'Transmission' }), ...this.componentRows('material', ['transmission', 'ior', 'thickness', 'attenuationColor', 'attenuationDistance']));
+        }
+        if (anime) {
+            rows.push(
+                ...this.animeRows(
+                    (n) => n.mesh?.material.anime,
+                    (n, next) => (n.mesh!.material.anime = next),
+                    (n) => n.mesh?.material.type === 'anime',
+                    textures,
+                ),
+            );
         }
 
         if (m.type === 'shader' && m.shader) {
@@ -824,6 +868,86 @@ export class InspectorPanel {
                 select.set(v ?? '');
             },
         };
+    }
+
+    /**
+     * Rows of an anime material's cel shading: its kind, then the groups the
+     * kind uses. A material stores only what was set (`get`), so a field
+     * shows what its kind gives it until it is changed; `put` stores the
+     * settings again without the fields that equal the kind's.
+     */
+    private animeRows(get: (n: NodeDoc) => AnimeInput, put: (n: NodeDoc, next: AnimeDoc) => void, filter: Filter, textures: AssetMeta[]): HTMLElement[] {
+        const schema = Anime.unwrap();
+        const shape = schema.shape as Record<string, z.ZodType>;
+        const now = resolveAnime(get(this.node));
+        const edit = (key: string, label: string) =>
+            this.hooks<any>(
+                `Anime ${label}`,
+                filter,
+                (n, v) => put(n, compactAnime({ ...(get(n) ?? {}), kind: resolveAnime(get(n)).kind, [key]: v })),
+                (n) => (resolveAnime(get(n)) as Record<string, unknown>)[key],
+            );
+        const shows: ((a: ReturnType<typeof resolveAnime>) => void)[] = [];
+        const fields = (keys: readonly string[]) => {
+            const f = schemaRows(schema, keys, now, edit);
+            shows.push((a) => f.set(a));
+            return f.rows;
+        };
+        const mapRow = (key: AnimeMapKey) => {
+            const m = fieldMeta(shape[key]);
+            const label = m.title ?? key;
+            const pick = (v: string | null) => edit(key, label).commit!(v);
+            const f = this.textureSelect(now[key] ?? null, textures, pick, ANIME_MAP_ROLES[key]);
+            shows.push((a) => f.set(a[key] ?? null));
+            // The character format's shared library (CC0), for the maps it has textures for.
+            const library = iconButton('book', 'From the shared library (CC0)', async (e) => {
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                const items = await libraryFor(key);
+                if (!items.length) {
+                    toast('The shared library has nothing for this map yet.', 'info');
+                    return;
+                }
+                showMenu(
+                    items.map((it) => ({
+                        label: it.uri.slice(it.uri.indexOf('/') + 1),
+                        action: async () => {
+                            const meta = await this.editor.libraryTexture(it.uri);
+                            if (meta) pick(meta.id);
+                        },
+                    })),
+                    r.left - 120,
+                    r.bottom + 4,
+                );
+            });
+            return row(label, h('div', { class: 'inline' }, f.el, library), m.description);
+        };
+        const group = (text: string) => h('div', { class: 'group-label', text });
+        const kind = now.kind;
+        // An overlay only darkens what it covers: its color (the slot's), opacity and mask.
+        if (kind === 'overlay') {
+            const rows: HTMLElement[] = [group('Cel Shading'), ...fields(['kind']), group('Overlay'), mapRow('overlayMap')];
+            this.watch(() => {
+                const a = resolveAnime(get(this.node));
+                for (const show of shows) show(a);
+            });
+            return rows;
+        }
+        const rows: HTMLElement[] = [group('Cel Shading'), ...fields(['kind']), ...fields(ANIME_ROWS.shade), mapRow('rampMap'), mapRow('shadeLut')];
+        if (kind === 'skin' || kind === 'face') rows.push(group('Skin'), ...fields(ANIME_ROWS.edge));
+        if (kind === 'face') rows.push(group('Face'), mapRow('faceMap'), mapRow('faceMaskMap'), mapRow('faceGlowMap'), ...fields(['faceGlowShift']));
+        rows.push(group('Light'), ...fields(ANIME_ROWS.light));
+        if (kind !== 'eye') rows.push(group('Highlight'), ...fields(kind === 'cloth' ? ANIME_ROWS.highlight : ['reflectance', 'specular']), mapRow('specularMap'));
+        if (kind === 'hair') rows.push(group('Hair Highlight'), ...fields(ANIME_ROWS.hair), group('Hair Strands'), mapRow('hairMap'), ...fields(ANIME_ROWS.strands));
+        if (kind === 'eye') rows.push(group('Eye'), ...fields(ANIME_ROWS.eye), mapRow('matcapMap'), ...fields(ANIME_ROWS.matcap));
+        rows.push(group('Outline'), ...fields(ANIME_ROWS.outline), mapRow('outlineMap'));
+        rows.push(group('Map Layout'), ...fields(ANIME_ROWS.layout));
+        // The head's frame matters to what turns with it: faces, hair, eyes.
+        if (kind === 'face' || kind === 'hair' || kind === 'eye') rows.push(group('Head'), ...fields(ANIME_ROWS.head));
+        this.watch(() => {
+            const a = resolveAnime(get(this.node));
+            for (const show of shows) show(a);
+        });
+        return rows;
     }
 
     /** Shader picker with status and edit / new actions. */
@@ -1407,6 +1531,14 @@ export class InspectorPanel {
             const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
             showMenu(
                 [
+                    {
+                        label: 'Set Up as Anime Character',
+                        icon: 'sphere',
+                        action: () => {
+                            const kinds = this.editor.setupAnimeCharacter(this.sameModel());
+                            if (kinds) toast(`Cel shading on ${Object.keys(kinds).length} material(s): check each one's kind under Materials.`, 'info');
+                        },
+                    },
                     { label: 'Reset All Overrides', icon: 'undo', enabled: () => overrides > 0, action: () => this.editor.resetModelOverrides(this.sameModel()) },
                     { label: 'Apply to All Instances', icon: 'copy', action: () => this.editor.copyOverridesToInstances(node.id) },
                 ],
@@ -1417,11 +1549,50 @@ export class InspectorPanel {
         if (overrides) rows.push(row('Overrides', h('div', { class: 'readonly', text: `${overrides} changed ${overrides === 1 ? 'item' : 'items'}` })));
         const out = [section('model', 'Model', 'model', rows, [menu])];
         if (info?.clips.length) out.push(this.animationSection(node, info.clips));
+        if (info?.skeleton) out.push(this.motionSection(node), this.characterFileSection(node));
         if (info) {
             out.push(this.materialSlotsSection(node, info));
             out.push(this.partsSection(node, info));
         }
         return out;
+    }
+
+    /**
+     * The character's license data (character format v1, MGL_character.meta)
+     * and writing the model as a character file. The data comes from the
+     * file (a converted model's starts as restrictive as it gets, with the
+     * original's terms as written) and goes into the files written here.
+     */
+    private characterFileSection(node: NodeDoc): HTMLElement {
+        const asset = node.model!.asset;
+        const same: Filter = (n) => n.model?.asset === asset;
+        const value = (n: NodeDoc): CharacterInfoDoc => n.model?.character ?? infoFromMeta(null, n.name);
+        const keys = [
+            'name', 'authors', 'licenseUrl', 'avatarPermission', 'commercialUsage', 'creditNotation', 'allowRedistribution', 'modification', 'partExtraction',
+            'allowExcessivelyViolentUsage', 'allowExcessivelySexualUsage', 'allowPoliticalOrReligiousUsage', 'allowAntisocialOrHateUsage',
+            'version', 'copyrightInformation', 'contactInformation', 'otherLicenseUrl', 'originalWork', 'rightsHolder', 'sourceTerms',
+        ];
+        const fields = schemaRows(CharacterInfo, keys, value(node), (key, label) =>
+            this.hooks<unknown>(`Character ${label}`, same, (n, v) => (n.model!.character = CharacterInfo.parse({ ...value(n), [key]: v })), (n) => (value(n) as Record<string, unknown>)[key]),
+        );
+        this.watch(() => fields.set(value(this.node)));
+        const write = () => void this.editor.exportCharacter(node.id);
+        const writeVrm = () => void this.editor.exportCharacter(node.id, 'vrm');
+        return section(
+            'character-file',
+            'Character File',
+            'user',
+            [
+                h('div', { class: 'muted small pad', text: 'License data written into character files (format v1). Name, Authors and License URL are required.' }),
+                ...fields.rows,
+                row(
+                    '',
+                    h('div', { class: 'inline' }, button('Export .glb', write, 'small', 'save'), button('Export .vrm', writeVrm, 'small', 'save')),
+                    'A .glb in the character format v1; a .vrm is the same file with VRM 1.0 beside it (MToon materials and VRM springs, approximate) for VRM apps.',
+                ),
+            ],
+            [iconButton('save', 'Write as a character file (.glb, format v1)', write)],
+        );
     }
 
     /** The clip the model plays, and on a character the clip of each mode. */
@@ -1445,6 +1616,29 @@ export class InspectorPanel {
                       ...ANIMATION_MODES.map((m) => clipRow(m, `Auto (${clipFor(clips, defaults(Animation), m) ?? 'keeps the clip'})`)),
                   ]
                 : []),
+        ]);
+    }
+
+    /**
+     * What moves the skeleton on top of the clip: which expression the face
+     * shows, whether it blinks, whether its spring bones swing. The
+     * expressions and the spring groups themselves are data of the model
+     * (NodeDoc.motion), set by a tool or a file, not row by row here.
+     */
+    private motionSection(node: NodeDoc): HTMLElement {
+        const same: Filter = (n) => n.model?.asset === node.model!.asset;
+        const names = Object.keys(node.motion?.expressions ?? {}).filter((n) => n !== 'blink');
+        const edit = this.hooks<string>('Expression', same, (n, v) => (n.motion = Motion.parse({ ...n.motion, expression: v })));
+        const f = new SelectField<string>([{ value: '', label: 'Rest' }, ...names.map((n) => ({ value: n, label: n }))], node.motion?.expression ?? '', (v) => edit.commit!(v));
+        this.watch(() => f.set(this.node.motion?.expression ?? ''));
+        const m = node.motion;
+        const summary = m
+            ? `${m.springs.length} spring ${m.springs.length === 1 ? 'group' : 'groups'}, ${m.colliders.length} ${m.colliders.length === 1 ? 'collider' : 'colliders'}, ${Object.keys(m.expressions).length} ${Object.keys(m.expressions).length === 1 ? 'expression' : 'expressions'}`
+            : 'No springs or expressions yet: they are set with the model\'s motion data.';
+        return section('motion', 'Motion', 'play', [
+            row('Expression', f.el, 'The face pose shown; it blends in. Expressions are sets of offsets of the face\'s bones.'),
+            ...this.componentRows('motion', ['blink', 'sway'], same),
+            h('div', { class: 'muted small pad', text: summary }),
         ]);
     }
 
@@ -1498,9 +1692,13 @@ export class InspectorPanel {
                 this.editor.setModelMaterial(ids(), slot.key, { shader: id, shading: undefined, params: o.params ?? {} }, 'Material Shader');
                 return;
             }
-            this.editor.setModelMaterial(ids(), slot.key, { shading: v === 'model' ? undefined : (v as SlotShading), shader: undefined, params: undefined }, 'Material Shading');
+            // Cel shading starts as what the slot's name says it is (a face, hair, an eye...).
+            const anime = v === 'anime' && !o.anime ? { anime: { kind: guessAnimeKind(slot.key, ...slot.parts) } } : {};
+            this.editor.setModelMaterial(ids(), slot.key, { shading: v === 'model' ? undefined : (v as SlotShading), shader: undefined, params: undefined, ...anime }, 'Material Shading');
         });
-        const rows: HTMLElement[] = [row('Shading', shadingSel.el, 'Model: the PBR material from the file. Unlit and Lambert replace it with that engine material. Custom Shader renders with a WGSL material shader.')];
+        const rows: HTMLElement[] = [
+            row('Shading', shadingSel.el, 'Model: the PBR material from the file. Unlit and Lambert replace it with that engine material. Anime shades it in light and shade with an outline, keeping the file\'s maps. Custom Shader renders with a WGSL material shader.'),
+        ];
         if (shading === 'shader' || (o.shader && !this.editor.shaders.isValid(o.shader))) {
             rows.push(...this.shaderRows(o.shader ?? null, (id) => this.editor.setModelMaterial(ids(), slot.key, { shader: id ?? undefined, shading: undefined, params: id ? o.params ?? {} : undefined }, 'Material Shader')));
         }
@@ -1515,7 +1713,7 @@ export class InspectorPanel {
             cutoff = new SliderField({ value: o.alphaCutoff ?? b.alphaCutoff, min: 0, max: 1, step: 0.01, ...set('alphaCutoff', 'Material Alpha Cutoff') });
             rows.push(row('Cutoff', cutoff.el));
         }
-        const pbrValues = shading === 'model' || shading === 'shader';
+        const pbrValues = shading === 'model' || shading === 'shader' || shading === 'anime';
         const metallic = new SliderField({ value: o.metallic ?? b.metallic, min: 0, max: 1, step: 0.01, ...set('metallic', 'Material Metallic') });
         const roughness = new SliderField({ value: o.roughness ?? b.roughness, min: 0, max: 1, step: 0.01, ...set('roughness', 'Material Roughness') });
         const emissive = new ColorField({ value: o.emissive ?? b.emissive, ...set('emissive', 'Material Emissive') });
@@ -1558,6 +1756,24 @@ export class InspectorPanel {
             (v) => this.editor.setModelMaterial(ids(), slot.key, { map: v === '__file' ? undefined : v || null }, 'Material Texture'),
         );
         rows.push(row('Double Sided', doubleSide.el), row('Texture', h('div', { class: 'inline' }, map.el, iconButton('upload', 'Import image', () => this.editor.importTextureDialog()))));
+        if (shading === 'anime') {
+            const asset = node.model!.asset;
+            const normal = new SliderField({ value: o.normalScale ?? b.normalScale, min: 0, max: 2, step: 0.01, ...set('normalScale', 'Material Normal Strength') });
+            rows.push(row('Normal Str.', normal.el, 'Strength of the file\'s normal map'));
+            extra.push(() => normal.set(this.node.model?.materials?.[slot.key]?.normalScale ?? b.normalScale));
+            rows.push(
+                ...this.animeRows(
+                    (n) => n.model?.materials?.[slot.key]?.anime,
+                    (n, next) => {
+                        const all = { ...(n.model!.materials ?? {}) };
+                        all[slot.key] = { ...(all[slot.key] ?? {}), anime: next };
+                        n.model!.materials = all;
+                    },
+                    (n) => n.model?.asset === asset,
+                    textures,
+                ),
+            );
+        }
         if (shading === 'shader' && o.shader) {
             const shaderId = o.shader;
             const props = this.editor.shaders.props(shaderId);

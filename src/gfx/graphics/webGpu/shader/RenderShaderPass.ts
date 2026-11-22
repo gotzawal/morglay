@@ -545,10 +545,30 @@ export class RenderShaderPass extends ShaderPassBase {
                 this._shaderChange = false;
             }
             this.shaderVariant = ShaderReflection.genRenderShaderVariant(this);
+            // Another variant: the pipelines kept per vertex packing were the old one's.
+            this._packingPipelines = undefined;
             this.reBuild(geometry, rendererPassState);
             this._valueChange = false;
             if (noticeFun) {
                 noticeFun();
+            }
+        } else {
+            // The pipeline reads vertices packed one way. This geometry may be
+            // packed another: its buffer was re-packed since (another pass of
+            // its material asked for one more attribute, which grows the
+            // stride), or the pass is shared with a mesh that carries other
+            // attributes. Draw it with the pipeline of its own packing.
+            if ((geometry.vertexBuffer?.packingId ?? 0) !== this._pipelinePacking) {
+                // It holds what this pass reads before its packing is taken (nothing to do when it already does).
+                geometry.generate(this.shaderReflection);
+                const packing = geometry.vertexBuffer?.packingId ?? 0;
+                const kept = this._packingPipelines?.get(packing);
+                if (kept) {
+                    this.pipeline = kept;
+                    this._pipelinePacking = packing;
+                } else if (packing !== this._pipelinePacking) {
+                    this.genRenderPipeline(geometry, rendererPassState);
+                }
             }
         }
         if (wasFirstBuild) {
@@ -1169,7 +1189,10 @@ export class RenderShaderPass extends ShaderPassBase {
         // different render targets (e.g. main GBuffer vs overlay BGRA8Unorm
         // canvas) produce incompatible pipelines, so they must cache
         // separately.
-        const pipelineKey = `${this.shaderVariant}|${RenderShaderPass._attachmentKey(renderPassState)}|a2c${shaderState.alphaToCoverageEnabled ? 1 : 0}|ucd${shaderState.unclippedDepth ? 1 : 0}`;
+        // ... and the way the geometry's vertices are packed: the same shader
+        // over a buffer with one more attribute has another stride.
+        const packing = bufferMesh.vertexBuffer?.packingId ?? 0;
+        const pipelineKey = `${this.shaderVariant}|${RenderShaderPass._attachmentKey(renderPassState)}|a2c${shaderState.alphaToCoverageEnabled ? 1 : 0}|ucd${shaderState.unclippedDepth ? 1 : 0}|vp${packing}`;
         let pipeline = PipelinePool.getSharePipeline(ctx, pipelineKey);
         if (pipeline) {
             this.pipeline = pipeline;
@@ -1177,7 +1200,14 @@ export class RenderShaderPass extends ShaderPassBase {
             this.pipeline = ctx.gpuContext.createPipeline(renderPipelineDescriptor as GPURenderPipelineDescriptor);
             PipelinePool.setSharePipeline(ctx, pipelineKey, this.pipeline);
         }
+        this._pipelinePacking = packing;
+        (this._packingPipelines ??= new Map()).set(packing, this.pipeline);
     }
+
+    /** The vertex packing (GeometryVertexBuffer.packingId) the current pipeline reads. */
+    private _pipelinePacking: number = 0;
+    /** This variant's pipeline for each vertex packing it has drawn. */
+    private _packingPipelines?: Map<number, GPURenderPipeline>;
 
     private static _attachmentKey(rps: RendererPassState): string {
         let k = '[';
@@ -1194,6 +1224,43 @@ export class RenderShaderPass extends ShaderPassBase {
         return k;
     }
 
+    /** Storage buffers only the fragment stage reads: the lights, their cluster tables, the probes. */
+    private static readonly FRAGMENT_STORAGE = new Set(['lightBuffer', 'lightAssignBuffer', 'assignTable', 'clusterBuffer', 'reflectionBuffer', 'irradianceData']);
+    /** Storage buffers only the vertex stage reads: a skin's joints, morph targets, instance matrices. */
+    private static readonly VERTEX_STORAGE = new Set(['jointsMatrixIndexTable', 'jointsInverseMatrix', 'jointsIndexMapingTable', 'morphTargetOpPositions', 'morphTargetOpNormals', 'instanceDrawID']);
+
+    /**
+     * A stage may read only so many storage buffers (8 unless the device
+     * gives more), and a buffer counts for every stage it is visible to,
+     * which is all of them unless it says otherwise. A skinned mesh with
+     * morph targets under clustered lights goes past 8. So when a stage is
+     * over the limit, the buffers are shown only to the stages that read
+     * them: none to the compute stage (a render pipeline has none), then the
+     * lights' to the fragment stage and the skin's to the vertex stage.
+     * Pipelines within the limit keep their layouts as they were.
+     */
+    private fitStorageBuffers(groups: { refs: ShaderReflectionVarInfo[], entries: GPUBindGroupLayoutEntry[] }[]) {
+        const limit = this._boundCtx!.device.limits.maxStorageBuffersPerShaderStage;
+        const storage: { entry: GPUBindGroupLayoutEntry, name: string }[] = [];
+        for (const group of groups) {
+            for (const entry of group.entries) {
+                if (entry.buffer?.type !== 'read-only-storage') continue;
+                storage.push({ entry, name: group.refs.find((r) => r && r.binding === entry.binding)?.varName ?? '' });
+            }
+        }
+        // One more in every stage: the model matrices of the global group.
+        const count = (stage: number) => 1 + storage.filter((s) => s.entry.visibility & stage).length;
+        const { VERTEX, FRAGMENT, COMPUTE } = GPUShaderStage;
+        if (count(VERTEX) <= limit && count(FRAGMENT) <= limit && count(COMPUTE) <= limit) return;
+        for (const s of storage) s.entry.visibility = (s.entry.visibility & ~COMPUTE) || (VERTEX | FRAGMENT);
+        if (count(VERTEX) > limit) {
+            for (const s of storage) if (RenderShaderPass.FRAGMENT_STORAGE.has(s.name)) s.entry.visibility = FRAGMENT;
+        }
+        if (count(FRAGMENT) > limit) {
+            for (const s of storage) if (RenderShaderPass.VERTEX_STORAGE.has(s.name)) s.entry.visibility = VERTEX;
+        }
+    }
+
     private createGroupLayouts() {
         this._groupsShaderReflectionVarInfos = [];
         let shaderReflection = this.shaderReflection;
@@ -1201,19 +1268,22 @@ export class RenderShaderPass extends ShaderPassBase {
         this.bindGroupLayouts = [GlobalBindGroupLayout.getGlobalDataBindGroupLayout(this._boundCtx!)];
 
         // Binding Group 1 is Global , skip
+        const groups: { index: number, refs: ShaderReflectionVarInfo[], entries: GPUBindGroupLayoutEntry[] }[] = [];
         for (let i = 1; i < shaderReflection.groups.length; i++) {
             let shaderRefs = shaderReflection.groups[i];
             if (shaderRefs) {
-                let entries = this.getGroupLayout(i, shaderRefs);
+                groups.push({ index: i, refs: shaderRefs, entries: this.getGroupLayout(i, shaderRefs) });
                 this._groupsShaderReflectionVarInfos[i] = shaderRefs;
-                let layout = device.createBindGroupLayout({
-                    entries,
-                    label: `vs${this.vsName} fs${this.fsName} ${shaderRefs.length}`
-                });
-                this.bindGroupLayouts[i] = layout;
             } else {
                 console.error("can't set empty group!", i);
             }
+        }
+        this.fitStorageBuffers(groups);
+        for (const group of groups) {
+            this.bindGroupLayouts[group.index] = device.createBindGroupLayout({
+                entries: group.entries,
+                label: `vs${this.vsName} fs${this.fsName} ${group.refs.length}`
+            });
         }
 
         let layouts = device.createPipelineLayout({
@@ -1224,14 +1294,18 @@ export class RenderShaderPass extends ShaderPassBase {
         if (this._groupsShaderReflectionVarInfos[0]) {
             // this.genGroups(0, this.groupsShaderReflectionVarInfos);
         }
+        // The layouts were just made again, so the bind groups are too: one made with the
+        // previous layouts no longer fits when a define added or removed a binding (a map
+        // switched off), and every draw of the pass would fail validation until a texture
+        // of the pass changed.
         if (this._groupsShaderReflectionVarInfos[1]) {
-            this.genGroups(1, this._groupsShaderReflectionVarInfos);
+            this.genGroups(1, this._groupsShaderReflectionVarInfos, true);
         }
         if (this._groupsShaderReflectionVarInfos[2]) {
-            this.genGroups(2, this._groupsShaderReflectionVarInfos);
+            this.genGroups(2, this._groupsShaderReflectionVarInfos, true);
         }
         if (this._groupsShaderReflectionVarInfos[3]) {
-            this.genGroups(3, this._groupsShaderReflectionVarInfos);
+            this.genGroups(3, this._groupsShaderReflectionVarInfos, true);
         }
 
         return layouts;

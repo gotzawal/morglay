@@ -4,7 +4,9 @@ import {
 } from '@orillusion/core';
 import type { MaterialOverride, ModelDoc, PartOverride, SlotShading, TextureRole, Vec3 } from '../core/types';
 import { colorToHex, hexToColor } from './color';
-import { applyAlpha, applyUVTransform, createBuiltinMaterial, EngineAlpha, engineAlpha, MaterialMaps, BASE_MAP } from './materials';
+import { applyAlpha, applySlotPass, applyUVTransform, createBuiltinMaterial, EngineAlpha, engineAlpha, isTransparent, MaterialMaps, BASE_MAP } from './materials';
+import { ANIME_MAPS, animeMapAssets, animeOutlined, applyAnime, createAnimeMaterial, inheritModelMaps, setAnimeCutout } from './animeMaterial';
+import { resolveAnime, type AnimeValues } from '../core/anime';
 import { applyProps, MODEL_MAPS, type ShaderManager } from './shaders';
 import { ownIndices } from './lod';
 
@@ -77,10 +79,14 @@ export interface ModelInfo {
     /** The skeleton's animator and the names of its clips, when the file has them. */
     animator: AnimatorComponent | null;
     clips: string[];
+    /** The animator of the model's skeleton, with clips or without: what moves bones on top of a clip binds to it. */
+    skeleton: AnimatorComponent | null;
     part(path: string): ModelPart | undefined;
     slot(key: string): ModelSlot | undefined;
     /** Part path of a renderer, for viewport picking. */
     pathOf(renderer: RenderNode): string | undefined;
+    /** Earlier keys of slots ("Material 3"), from when the copies of materials on skinned meshes had no names, to the keys they have now. */
+    legacy: Map<string, string>;
 }
 
 const UNNAMED = /^[0-9A-F]{16}$/;
@@ -202,13 +208,19 @@ export function inspectModel(root: Object3D, ctx?: any): ModelInfo {
     const slots: ModelSlot[] = [];
     const slotOf = new Map<Material, string>();
     const byRenderer = new Map<RenderNode, string>();
+    const legacy = new Map<string, string>();
     let unnamed = 0;
 
-    const slotKey = (mat: Material): string => {
+    const slotKey = (mat: Material, skinned: boolean): string => {
         let key = slotOf.get(mat);
         if (key) return key;
         const name = (mat.name || '').trim();
-        key = name && !UNNAMED.test(name) ? name : `Material ${++unnamed}`;
+        if (name && !UNNAMED.test(name)) {
+            key = name;
+            // A skinned mesh's copy of a material used to lose its name and was
+            // numbered like an unnamed one: scenes saved then know the slot by that number.
+            if (skinned) legacy.set(`Material ${++unnamed}`, key);
+        } else key = `Material ${++unnamed}`;
         slotOf.set(mat, key);
         let slot = slots.find((s) => s.key === key);
         if (!slot) {
@@ -237,7 +249,7 @@ export function inspectModel(root: Object3D, ctx?: any): ModelInfo {
                 const p = paths.get(r)!;
                 const pos = r.geometry.getAttribute(VertexAttributeName.position)?.data;
                 const idx = ownIndices(r.geometry);
-                const key = slotKey(mat);
+                const key = slotKey(mat, r instanceof SkinnedMeshRenderer2);
                 // The loader puts each primitive in its own child named after
                 // the mesh; the glTF node above it has the meaningful name.
                 const siblings = (obj.entityChildren as Object3D[]).filter((o) => o instanceof Object3D && Array.from(o.components.values()).some((c) => c instanceof RenderNode));
@@ -278,16 +290,36 @@ export function inspectModel(root: Object3D, ctx?: any): ModelInfo {
 
     const partIndex = new Map(parts.map((p) => [p.path, p]));
     const slotIndex = new Map(slots.map((s) => [s.key, s]));
-    const animator = root.getComponentsInChild(AnimatorComponent).find((a) => a.clips?.length) ?? null;
+    const animators = root.getComponentsInChild(AnimatorComponent);
+    const animator = animators.find((a) => a.clips?.length) ?? null;
     return {
         parts,
         slots,
         animator,
+        skeleton: animator ?? animators[0] ?? null,
         clips: animator ? animator.clips.map((c) => c.clipName) : [],
         part: (path) => partIndex.get(path),
         slot: (key) => slotIndex.get(key),
         pathOf: (r) => byRenderer.get(r),
+        legacy,
     };
+}
+
+/**
+ * A model's slot overrides by the slots it has now: one stored under a
+ * slot's earlier number (ModelInfo.legacy) counts for the slot, unless the
+ * slot has its own.
+ */
+export function slotOverrides(info: ModelInfo, materials: Record<string, MaterialOverride> | undefined): Record<string, MaterialOverride> {
+    const all = materials ?? {};
+    if (!info.legacy.size) return all;
+    let out: Record<string, MaterialOverride> | null = null;
+    for (const [old, key] of info.legacy) {
+        if (!all[old] || all[key] || info.slot(old)) continue;
+        out ??= { ...all };
+        out[key] = { ...all[old], ...out[key] };
+    }
+    return out ?? all;
 }
 
 function isEmpty(o: object | undefined): boolean {
@@ -300,6 +332,8 @@ interface OverrideMaterial {
     maps: MaterialMaps;
     /** Asset textures of custom shader params, by property name. */
     paramAssets: Record<string, string>;
+    /** The cel shading settings of an anime material. */
+    anime?: AnimeValues;
 }
 
 export interface OverrideDeps {
@@ -340,14 +374,16 @@ export class ModelOverrides {
     }
 
     apply(model: ModelDoc, nodeVisible: boolean) {
-        const materials = model.materials ?? {};
+        const materials = slotOverrides(this.info, model.materials);
         const parts = model.parts ?? {};
 
         const wanted = new Set<string>();
         for (const part of this.info.parts) {
             const po: PartOverride = parts[part.path] ?? {};
-            const moved = !!po.material && po.material !== part.slot && !!this.info.slot(po.material);
-            const slot = this.info.slot(moved ? po.material! : part.slot)!;
+            // The slot a part was moved to, also by its earlier number.
+            const to = po.material && !this.info.slot(po.material) ? this.info.legacy.get(po.material) : po.material;
+            const moved = !!to && to !== part.slot && !!this.info.slot(to);
+            const slot = this.info.slot(moved ? to! : part.slot)!;
             const mo = materials[slot.key];
 
             // Which file material the part renders with, and the key of this
@@ -435,6 +471,13 @@ export class ModelOverrides {
         this.mats.clear();
     }
 
+    /** This instance's anime materials with their settings (what turns them with the head each frame). */
+    animeMaterials(): { material: Material; anime: AnimeValues }[] {
+        const out: { material: Material; anime: AnimeValues }[] = [];
+        for (const om of this.mats.values()) if (om.anime) out.push({ material: om.material, anime: om.anime });
+        return out;
+    }
+
     /** Builds (when its structure changed) and updates this instance's material for a slot. */
     private refreshSlot(key: string, slot: ModelSlot, source: Material, o: MaterialOverride) {
         const { shaders, ctx } = this.deps;
@@ -442,18 +485,28 @@ export class ModelOverrides {
         const shaderId = shading === 'shader' ? o.shader! : null;
         const base = slot.base;
         const opacity = o.opacity ?? base.opacity;
-        const structure = JSON.stringify({ shading, shader: shaderId, version: shaderId ? shaders.version(shaderId) : 0 });
+        // Alpha: an explicit mode wins. Otherwise the slot keeps the file's
+        // mode (opaque, cut-out or blend), also when only other values were
+        // changed; an opacity override below 1 makes it blend.
+        const alpha: EngineAlpha =
+            o.alphaMode && o.alphaMode !== 'auto' ? engineAlpha(o.alphaMode, opacity) : o.opacity !== undefined && o.opacity < 0.999 && base.alpha !== 'BLEND' ? 'BLEND' : base.alpha;
+        const anime = shading === 'anime' ? resolveAnime(o.anime) : null;
+        // An anime material with an outline has a second pass: another material than one without.
+        const outlined = !!anime && animeOutlined(anime, isTransparent(alpha));
+        const structure = JSON.stringify({ shading, shader: shaderId, version: shaderId ? shaders.version(shaderId) : 0, outlined });
         let om = this.mats.get(key);
         if (!om || om.structure !== structure) {
             if (om) this.deps.dispose(om.material);
             let material: Material | null = null;
             if (shaderId) {
                 material = shaders.createMaterial(shaderId);
-            } else if (shading === 'unlit' || shading === 'lambert') {
-                material = createBuiltinMaterial(shading, ctx);
+            } else if (shading === 'unlit' || shading === 'lambert' || shading === 'anime') {
+                material = shading === 'anime' ? createAnimeMaterial(ctx, outlined) : createBuiltinMaterial(shading, ctx);
                 // Texture repeat and offset as the file has them.
                 const uv = safe(() => source.shader.getUniformVector4('baseMapOffsetSize')) as Vector4 | undefined;
                 if (uv) applyUVTransform(material, [uv.z, uv.w], [uv.x, uv.y]);
+                // Cel shading keeps the detail the model was made with.
+                if (shading === 'anime') inheritModelMaps(material, source, ctx);
             }
             if (material) {
                 // A replacement keeps the file's color texture.
@@ -470,11 +523,17 @@ export class ModelOverrides {
         const mat = om.material;
         const sh = mat.shader;
         sh.setUniformColor('baseColor', hexToColor(o.color ?? base.color, opacity));
-        if (shading === 'model' || shading === 'shader') {
+        if (shading === 'model' || shading === 'shader' || shading === 'anime') {
             sh.setUniformFloat('metallic', clamp01(o.metallic ?? base.metallic));
             sh.setUniformFloat('roughness', clamp01(o.roughness ?? base.roughness));
             sh.setUniformColor('emissiveColor', hexToColor(o.emissive ?? base.emissive));
             sh.setUniformFloat('emissiveIntensity', Math.max(0, o.emissiveIntensity ?? base.emissiveIntensity));
+        }
+        om.anime = anime ?? undefined;
+        if (anime) {
+            sh.setUniformFloat('normalScale', Math.max(0, o.normalScale ?? base.normalScale));
+            applyAnime(mat, anime, isTransparent(alpha));
+            for (const { map, asset } of animeMapAssets(o.anime)) om.maps.set(map, asset);
         }
         if (mat instanceof LitMaterial && shading === 'model') {
             // Only touch what the override sets: the file's values stay as loaded.
@@ -493,13 +552,9 @@ export class ModelOverrides {
         }
         mat.doubleSide = o.doubleSide ?? base.doubleSide;
 
-        // Alpha: an explicit mode wins. Otherwise the slot keeps the file's
-        // mode (opaque, cut-out or blend), also when only other values were
-        // changed; an opacity override below 1 makes it blend.
-        const cutoff = clamp01(o.alphaCutoff ?? base.alphaCutoff);
-        if (o.alphaMode && o.alphaMode !== 'auto') applyAlpha(mat, engineAlpha(o.alphaMode, opacity), cutoff);
-        else if (o.opacity !== undefined && o.opacity < 0.999 && base.alpha !== 'BLEND') applyAlpha(mat, 'BLEND', cutoff);
-        else applyAlpha(mat, base.alpha, cutoff);
+        applyAlpha(mat, alpha, clamp01(o.alphaCutoff ?? base.alphaCutoff));
+        if (anime) setAnimeCutout(mat, alpha === 'MASK');
+        applySlotPass(mat, o.pass, shading === 'anime');
 
         if (shaderId) {
             // Texture properties named after the model's maps get the file's maps.

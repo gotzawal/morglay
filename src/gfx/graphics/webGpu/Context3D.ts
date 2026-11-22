@@ -174,7 +174,11 @@ export class Context3D extends CEventDispatcher {
             requiredFeatures: wanted.filter((f) => this.adapter.features.has(f)),
             requiredLimits: {
                 minUniformBufferOffsetAlignment: 256,
-                maxStorageBufferBindingSize: this.adapter.limits.maxStorageBufferBindingSize
+                maxStorageBufferBindingSize: this.adapter.limits.maxStorageBufferBindingSize,
+                // More than the 8 every device has, where the adapter gives them: a skinned
+                // mesh with morph targets under clustered lights reads 9 or 10 (pipelines
+                // on a device with 8 narrow their buffers' stages, RenderShaderPass.fitStorageBuffers).
+                maxStorageBuffersPerShaderStage: Math.max(8, Math.min(this.adapter.limits.maxStorageBuffersPerShaderStage ?? 8, 16)),
             }
         });
         if (!this.device) throw new Error('Your browser does not support WebGPU!');

@@ -224,8 +224,13 @@ export class AnimationCurve {
      */
     public wrapTime(curveT: number) {
         let m_Curve = this.curve;
+        if (m_Curve.length === 0) return curveT;
         let begTime = m_Curve[0].time;
         let endTime = m_Curve[m_Curve.length - 1].time;
+        // One key (a track that holds a constant, as exporters write a bone that
+        // does not move) has no span to repeat over: wrapping would divide by it
+        // and hand NaN to every bone below. The curve is that key at any time.
+        if (!(endTime > begTime)) return begTime;
 
         if (curveT < begTime) {
             if (this.preWarpMode == WrapTimeMode.Clamp) curveT = begTime;

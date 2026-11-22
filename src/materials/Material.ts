@@ -329,6 +329,9 @@ export class Material {
      */
     public clone() {
         let newMat = new Material();
+        // A copy is the same material by name (a glTF material shared by
+        // several skinned meshes, each with its own copy).
+        newMat.name = this.name;
         newMat.shader = this.shader.clone();
         return newMat;
     }

@@ -172,9 +172,10 @@ export class DerivedAssets extends Emitter<{ status: string }> implements Textur
         }
     }
 
-    /** The role a texture is compressed for when it replaces its file: a normal map wherever one uses it so, else color, else data; by its name when nothing uses it yet. */
+    /** The role a texture is compressed for when it replaces its file: none where a material reads it as a lookup, a normal map wherever one uses it so, else color, else data; by its name when nothing uses it yet. */
     private roleOf(meta: AssetMeta): TextureRole {
         const roles = assetRoles(this.store.doc).get(meta.id);
+        if (roles?.has('lookup')) return 'lookup';
         if (roles?.has('normal')) return 'normal';
         if (roles?.has('color')) return 'color';
         if (roles?.has('data')) return 'data';

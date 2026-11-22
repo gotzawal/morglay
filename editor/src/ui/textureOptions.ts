@@ -13,7 +13,7 @@ import { h } from './dom';
 import { popover } from './overlays';
 import { button, CheckboxField, row, SelectField } from './widgets';
 
-const ROLE_TEXT: Record<DerivedRole, string> = { color: 'as a color map', normal: 'as a normal map', data: 'as a data map', model: 'for games' };
+const ROLE_TEXT: Record<DerivedRole, string> = { color: 'as a color map', normal: 'as a normal map', data: 'as a data map', lookup: 'as a lookup table (kept exact)', model: 'for games' };
 
 type Mode = NonNullable<TextureCompression['mode']>;
 

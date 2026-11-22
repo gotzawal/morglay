@@ -7,8 +7,9 @@ import { MorphTarget_shader } from "../../../../components/anim/morphAnim/MorphT
 export let VertexFunction_vert: string = /*wgsl*/ `
     var<private> PI: f32 = 3.14159265359;
     #if USE_METAHUMAN
+        // Morph targets take three bindings (the third with morphed normals); the skin comes after.
         ${MorphTarget_shader.getMorphTargetShaderBinding(3, 0)}
-        ${SkeletonAnimation_shader.groupBindingAndFunctions(3, 2)}
+        ${SkeletonAnimation_shader.groupBindingAndFunctions(3, 3)}
     #else
         #if USE_MORPHTARGETS
             ${MorphTarget_shader.getMorphTargetShaderBinding(3, 0)}

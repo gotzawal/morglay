@@ -143,7 +143,19 @@ export class ShadowLightsCollect {
 
     public static removeShadowLight(light: ILight) {
         light.lightData.castShadowIndex = -1;
-        if (!light.transform.view3D) return null;
+        if (!light.transform.view3D) {
+            // The transform no longer leads to a scene: an object's transform is
+            // destroyed before its other components, so a light destroyed with its
+            // object comes here. It goes from every scene's lists (a destroyed
+            // light left in one breaks the shadow pass the next time it draws them all).
+            for (const lists of [this.directionLightList, this.pointLightList]) {
+                lists?.forEach((list) => {
+                    const index = list.indexOf(light);
+                    if (index != -1) list.splice(index, 1);
+                });
+            }
+            return null;
+        }
         if (light.lightData.lightType == LightType.DirectionLight) {
             let list = this.directionLightList.get(light.transform.view3D.scene);
             if (list) {

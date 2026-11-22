@@ -193,7 +193,7 @@ function devPlayer() {
             configFile: false,
             mode: 'production',
             logLevel: 'warn',
-            plugins: [playerManifest()],
+            plugins: [playerManifest(), shadingPack({ allow: false })],
             build: {
                 target: 'esnext',
                 outDir,
@@ -262,6 +262,41 @@ function devPlayer() {
 }
 
 /**
+ * A local cel shading pack: a JavaScript module outside the repository that
+ * exports makeShading(deps) (see engine/animeShadingApi.ts). The file
+ * editor/.shading-pack (git ignores it) or MORGLAY_SHADING_PACK names it;
+ * without one, the module is empty and the editor uses its own cel shading.
+ * Only the dev server takes a pack: every build (the editor's, and the
+ * player's with `allow` false) draws with the editor's own shading, so a
+ * pack never goes out in a bundle.
+ */
+function shadingPack({ allow }) {
+    const ID = 'virtual:morglay-shading-pack'
+    let serving = false
+    const packFile = () => {
+        const named = process.env.MORGLAY_SHADING_PACK
+            || (fs.existsSync(here('./.shading-pack')) ? fs.readFileSync(here('./.shading-pack'), 'utf8').trim() : '')
+        return allow && serving && named && fs.existsSync(named) ? named : ''
+    }
+    return {
+        name: 'morglay-shading-pack',
+        configResolved(config) {
+            serving = config.command === 'serve'
+        },
+        resolveId(id) {
+            return id === ID ? '\0' + ID : undefined
+        },
+        load(id) {
+            if (id !== '\0' + ID) return undefined
+            const file = packFile()
+            if (!file) return 'export const makeShading = undefined'
+            this.addWatchFile(file)
+            return fs.readFileSync(file, 'utf8')
+        },
+    }
+}
+
+/**
  * A folder of files at <name>/ next to the editor: served by the dev
  * server, copied into the editor's build. They are not in public/, so the
  * player builds leave them out. The asset library (editor/library,
@@ -293,7 +328,15 @@ function folder(name, dir) {
 
 export default defineConfig({
     ...shared(),
-    plugins: [playerManifest(), devPlayer(), folder('library', here('./library')), folder('examples', here('./examples'))],
+    plugins: [
+        playerManifest(),
+        devPlayer(),
+        shadingPack({ allow: true }),
+        folder('library', here('./library')),
+        folder('examples', here('./examples')),
+        // The character format's shared textures (made by scripts/make-mgl-library.mjs, CC0).
+        folder('mgl-library', here('./mgl-library')),
+    ],
     server: {
         host: '0.0.0.0',
         port: 8100,

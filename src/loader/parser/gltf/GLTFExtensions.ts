@@ -62,3 +62,33 @@ export function preferredImages(gltf: { textures?: any[] }): Set<number> {
     }
     return out;
 }
+
+/**
+ * The images the materials of a glTF read only as colors (base color,
+ * emission, sheen and specular color). They hold sRGB-encoded values, so
+ * they load in an sRGB format: sampling decodes them before filtering, and
+ * their mipmaps are averaged in linear light, as other renderers do. An
+ * image a material also reads as data (a normal map, a mask) is not one.
+ */
+export function colorImages(gltf: { materials?: any[]; textures?: any[] }): Set<number> {
+    const color = new Set<number>();
+    const data = new Set<number>();
+    const images = (info: any): number[] => {
+        const texture = typeof info?.index === 'number' ? gltf?.textures?.[info.index] : undefined;
+        return texture ? textureSources(texture) : [];
+    };
+    for (const m of gltf?.materials ?? []) {
+        const ext = m?.extensions ?? {};
+        const colors = [m?.pbrMetallicRoughness?.baseColorTexture, m?.emissiveTexture, ext.KHR_materials_sheen?.sheenColorTexture, ext.KHR_materials_specular?.specularColorTexture];
+        const datas = [
+            m?.normalTexture, m?.occlusionTexture, m?.pbrMetallicRoughness?.metallicRoughnessTexture,
+            ext.KHR_materials_clearcoat?.clearcoatTexture, ext.KHR_materials_clearcoat?.clearcoatRoughnessTexture, ext.KHR_materials_clearcoat?.clearcoatNormalTexture,
+            ext.KHR_materials_transmission?.transmissionTexture, ext.KHR_materials_volume?.thicknessTexture,
+            ext.KHR_materials_sheen?.sheenRoughnessTexture, ext.KHR_materials_specular?.specularTexture,
+        ];
+        for (const info of colors) for (const i of images(info)) color.add(i);
+        for (const info of datas) for (const i of images(info)) data.add(i);
+    }
+    for (const i of data) color.delete(i);
+    return color;
+}

@@ -57,8 +57,10 @@ export function fitLightShadow(light: LightBase, tier: QualityTier) {
         if (csm) return;
         // A single map covers the range around the light (or the camera),
         // and as far toward the light as that, so tall casters keep their tops.
-        light.shadowBoundWidth = range;
-        light.shadowBoundHeight = range;
+        // An area of its own size sets the box across the light.
+        const area = coverage === 'area' && s.area && s.area[0] > 0 && s.area[1] > 0 ? s.area : null;
+        light.shadowBoundWidth = area ? area[0] : range;
+        light.shadowBoundHeight = area ? area[1] : range;
         light.shadowBoundNear = -range;
         light.shadowBoundFar = range;
         light.shadowFollow = coverage === 'follow';

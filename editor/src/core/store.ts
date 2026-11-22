@@ -4,8 +4,8 @@ import { defaultCamera, defaultRenderGraph, uid } from './defaults';
 import { sanitizeAgent, sanitizeBehaviors, sanitizeBlackboards, sanitizeMemory, sanitizeAiModels } from './behavior/format';
 import { sanitizeDesign } from './design';
 import { migrateScene } from './migrate';
-import { isMobileDevice } from './quality';
-import { Animation, AudioSource, Body, Camera, Character, Environment, Grass, Instancing, Light, Mesh, Mirror, Model, Params, Particles, Player, Rain, Scatter, Terrain, Tree } from './model';
+import { isMobileDevice, type QualityLevel } from './quality';
+import { Animation, AudioSource, Body, Camera, Character, Environment, Grass, Instancing, Light, Mesh, Mirror, Model, Motion, Params, Particles, Player, Rain, Scatter, Terrain, Tree } from './model';
 import { defaults, isObj, repair, str, vecOr } from './schema';
 import {
     SCENE_VERSION, UNTITLED_SCENE, type BuildDoc, type CameraState, type NodeDoc, type ParamValue, type PostDoc, type PrefabDoc, type RenderGraphDoc,
@@ -40,8 +40,8 @@ export type Tool = 'select' | 'translate' | 'rotate' | 'scale';
 export type Space = 'world' | 'local';
 /** How often the viewport draws: at most this many frames per second, or as often as the display refreshes (0). */
 export type ViewportFps = 30 | 60 | 0;
-/** How sharp the viewport draws (see engine/runtime.ts VIEWPORT_QUALITY). */
-export type ViewportQuality = 'low' | 'medium' | 'high';
+/** How sharp the viewport draws (see engine/runtime.ts VIEWPORT_QUALITY); ultra draws twice as many pixels each way and lets them be averaged (smooth edges). */
+export type ViewportQuality = 'low' | 'medium' | 'high' | 'ultra';
 
 export interface Prefs {
     tool: Tool;
@@ -61,7 +61,7 @@ export interface Prefs {
     /** The viewport's resolution: medium on a computer, low on a phone or tablet by default. Captures (the assistant's, shots) are taken sharp either way. */
     viewportQuality: ViewportQuality;
     /** A graphics quality tier the viewport shows instead of the scene's ('scene': the scene's, high when auto). */
-    previewQuality: 'scene' | ViewportQuality;
+    previewQuality: 'scene' | QualityLevel;
     /** Draw the viewport at fewer pixels while frames run late (and back up when there is room). */
     adaptiveResolution: boolean;
     /** Make the compressed copies of textures (KTX2) in the background while editing, not only when building. */
@@ -214,7 +214,7 @@ function loadPrefs(): Prefs {
     const base = defaultPrefs();
     const prefs = { ...base, ...saved };
     if (![30, 60, 0].includes(prefs.viewportFps)) prefs.viewportFps = base.viewportFps;
-    if (!['low', 'medium', 'high'].includes(prefs.viewportQuality)) prefs.viewportQuality = base.viewportQuality;
+    if (!['low', 'medium', 'high', 'ultra'].includes(prefs.viewportQuality)) prefs.viewportQuality = base.viewportQuality;
     if (!['scene', 'low', 'medium', 'high'].includes(prefs.previewQuality)) prefs.previewQuality = 'scene';
     prefs.adaptiveResolution = prefs.adaptiveResolution !== false;
     prefs.editMode = prefs.editMode === true;
@@ -1094,6 +1094,7 @@ function sanitizeComponents(node: NodeDoc, scriptIds: Set<string>) {
     set('particles', repair(Particles, node.particles));
     set('body', repair(Body, node.body));
     set('animation', repair(Animation, node.animation));
+    set('motion', node.model ? repair(Motion, node.motion) : undefined);
     set('mirror', node.mesh ? repair(Mirror, node.mirror) : undefined);
     set('grass', repair(Grass, node.grass));
     set('rain', repair(Rain, node.rain));

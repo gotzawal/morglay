@@ -34,7 +34,8 @@ export function setAssetResolver(fn: ((meta: AssetMeta) => string | null) | null
 
 export function kindOf(file: { name: string; type: string }): AssetKind | null {
     const name = file.name.toLowerCase();
-    if (name.endsWith('.glb') || name.endsWith('.gltf')) return 'model';
+    // A .pmx (MikuMikuDance) is turned into a GLB on import; a .vrm is a GLB.
+    if (name.endsWith('.glb') || name.endsWith('.gltf') || name.endsWith('.pmx') || name.endsWith('.vrm')) return 'model';
     if (/\.(png|jpe?g|webp|gif|bmp|avif|ktx2)$/.test(name) || file.type.startsWith('image/')) return 'texture';
     if (/\.(mp3|ogg|oga|opus|wav|m4a|aac|flac|weba)$/.test(name) || file.type.startsWith('audio/')) return 'audio';
     return null;
@@ -176,7 +177,7 @@ export async function deleteAssets(keep: Set<string> | (() => Set<string>)): Pro
 
 function guessMime(name: string): string {
     const n = name.toLowerCase();
-    if (n.endsWith('.glb')) return 'model/gltf-binary';
+    if (n.endsWith('.glb') || n.endsWith('.vrm')) return 'model/gltf-binary';
     if (n.endsWith('.gltf')) return 'model/gltf+json';
     if (n.endsWith('.png')) return 'image/png';
     if (n.endsWith('.jpg') || n.endsWith('.jpeg')) return 'image/jpeg';
