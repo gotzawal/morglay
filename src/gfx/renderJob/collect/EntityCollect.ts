@@ -269,6 +269,15 @@ export class EntityCollect {
     }
 
     public removeLight(root: Scene3D, light: ILight) {
+        if (!root) {
+            // The light's transform no longer names its scene (an object's transform
+            // is destroyed before its other components): out of every scene's list.
+            this._sceneLights.forEach((list) => {
+                const index = list.indexOf(light);
+                if (index != -1) list.splice(index, 1);
+            });
+            return;
+        }
         if (this._sceneLights.has(root)) {
             let list = this._sceneLights.get(root);
             let index = list.indexOf(light);
