@@ -20,6 +20,8 @@ dist
 # others
 /.env
 /.env.local
+# a local cel shading pack's path (editor/vite.config.js)
+/editor/.shading-pack
 /js
 
 /.vscode

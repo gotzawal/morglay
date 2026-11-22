@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import { fieldDefault, fieldMeta, inner } from '../core/schema';
-import { CheckboxField, ColorField, NumberField, SelectField, SliderField, Vec2Field, Vec3Field, row, type EditHooks } from './widgets';
+import { CheckboxField, ColorField, NumberField, SelectField, SliderField, TextAreaField, TextField, Vec2Field, Vec3Field, row, type EditHooks } from './widgets';
 
 /** A field's label: its title, or the key in words ("runSpeed" is "Run Speed"). */
 export const fieldLabel = (key: string, title?: string) => title ?? key.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
@@ -68,6 +68,12 @@ function control(s: z.ZodType, m: ReturnType<typeof fieldMeta>, value: Value, ho
         case 'vec2':
         case 'range':
             return new Vec2Field({ value, step: m.step ?? 0.05, precision: m.precision ?? 2, labels: m.kind === 'range' ? ['Min', 'Max'] : undefined, ...hooks() });
+        case 'text': {
+            // Long texts (over 400 characters allowed) get a box of a few lines.
+            const max = (s as z.ZodString).maxLength ?? Infinity;
+            const f = max > 400 ? new TextAreaField(String(value ?? ''), (v) => hooks().commit!(v), '', 4) : new TextField(String(value ?? ''), (v) => hooks().commit!(v));
+            return { el: f.el, set: (v: Value) => f.set(String(v ?? '')) };
+        }
     }
     throw new Error(`The inspector has no field for a ${m.kind ?? 'plain'} schema field.`);
 }

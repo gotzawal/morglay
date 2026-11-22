@@ -92,7 +92,7 @@ export function textureRoleOf(defaultName: unknown): TextureRole {
 }
 
 /** Uniform struct of the engine's PBR material, which the lighting code reads. */
-const ENGINE_FIELDS = `
+export const ENGINE_FIELDS = `
     baseColor: vec4<f32>,
     emissiveColor: vec4<f32>,
     materialF0: vec4<f32>,

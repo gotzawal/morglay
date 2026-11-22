@@ -46,18 +46,169 @@ export const GEOMETRY_TYPES: GeometryType[] = ['box', 'sphere', 'plane', 'cylind
 
 // ----------------------------------------------------------------- material
 
-export const MATERIAL_TYPES = ['lit', 'unlit', 'lambert', 'shader'] as const;
+export const MATERIAL_TYPES = ['lit', 'unlit', 'lambert', 'anime', 'shader'] as const;
 export const ALPHA_MODES = ['auto', 'opaque', 'blend', 'mask', 'additive', 'multiply'] as const;
+
+/** What an anime material is on a character: each kind starts from its own look (core/anime.ts). */
+export const ANIME_KINDS = ['cloth', 'skin', 'face', 'hair', 'eye', 'overlay'] as const;
+/** The axis of a mesh the head faces along. */
+export const ANIME_AXES = ['+z', '-z', '+x', '-x', '+y', '-y'] as const;
+/** The axis of a mesh that points up (models are built Y-up or Z-up). */
+export const ANIME_UP_AXES = ['+y', '+z'] as const;
+/** How a normal map stores its directions. */
+export const ANIME_NORMAL_LAYOUTS = ['rgb', 'ag', 'split'] as const;
+/** What the channels of the metallic-roughness map hold. */
+export const ANIME_MASK_LAYOUTS = ['orm', 'toon'] as const;
+/** Where an outline's direction comes from. */
+export const ANIME_OUTLINE_NORMALS = ['mesh', 'baked', 'tangent'] as const;
+/** The highlight of a cloth surface. */
+export const ANIME_HIGHLIGHTS = ['ggx', 'toon', 'none'] as const;
+/** How the scene's light is mapped to the screen. */
+export const TONE_MAPPINGS = ['filmic', 'none', 'display'] as const;
+
+const animeNum = (d: number, min: number, max: number, m = {}) => num(d, min, max, { step: 0.01, slider: true, ...m }).optional();
+const animeVec = (d: [number, number, number], m = {}) => vec3(d, { precision: 4, ...m }).optional();
+
+/**
+ * Cel shading of the 'anime' material (engine/animeMaterial.ts). The key
+ * light (the first directional light) sets how lit each point is (a ramp's
+ * alpha, a face shadow map, cast shadows, a light mask); the lit color is
+ * the base color, the shade color is made from it (saturation, brightness,
+ * darkness, or a color table) and tinted by half the Shade Light Tint, and
+ * both take the key light, less of it on surfaces turned down. Highlights come from a toon or
+ * GGX lobe colored by a highlight ramp, hair has two strand lobes, eyes an
+ * iris set back behind a raised cornea that carries a matcap. The outline is a second, slightly larger hull
+ * of back faces, lit as the surface is. Only `kind` is always there: a field
+ * left out takes the kind's value (core/anime.ts resolveAnime), so the
+ * defaults below are the cloth kind's.
+ */
+export const Anime = group({
+    kind: oneOf(ANIME_KINDS, 'cloth', {
+        labels: { cloth: 'Cloth', skin: 'Skin', face: 'Face', hair: 'Hair', eye: 'Eye', overlay: 'Overlay' },
+        description: 'What the surface is on a character; it sets the values of the fields left out and how it is shaded. cloth: clothes, props, anything else. skin: body skin, with an edge tint and a soft skin highlight. '
+            + 'face: skin shaded by a face shadow map (face_map) turned with the head. hair: two highlight lobes along the strands. eye: lit level with the head, the iris set back behind the surface, a matcap on the cornea; no outline. '
+            + 'overlay: unlit, darkens what it covers by its color as the screen shows it (a shadow painted onto the eyes or the face; use the Multiply alpha mode), as much as the opacity and the Overlay Mask say.',
+    }),
+    shadeBrightness: animeNum(0.6, 0, 2, { title: 'Shade Brightness', description: 'Brightness of the shade color made from the base color (before Shade Darkness).' }),
+    shadeSaturation: animeNum(1, 0, 3, { title: 'Shade Saturation', description: 'Saturation of the shade color made from the base color: above 1 keeps shade from going grey.' }),
+    shadeDarkness: animeNum(0.5, 0, 1, { title: 'Shade Darkness', description: 'How much of its brightness the shade keeps; highlights in shade are dimmed as much.' }),
+    shadeTint: animeVec([1, 1, 1], { title: 'Shade Light Tint', description: 'Tints the shade color (half of it is applied; linear, may be above 1): cool for clothes and hair, warm for skin.' }),
+    ambient: animeNum(0, 0, 2, { title: 'Environment Light', description: "How much the scene's environment (its sky, blurred) adds, in the shade color, over the whole surface (it shows most in the shade): 0 (the default) for none." }),
+    shadeBias: animeNum(0, -1, 1, { title: 'Shade Bias', description: 'Added to how much a point faces the light before the ramp: above 0 lights more of the surface.' }),
+    step: animeNum(0.5, 0, 1, { title: 'Shade Edge', description: 'Without a ramp: where light turns to shade, 0.5 at the line the light just grazes.' }),
+    feather: animeNum(0.03, 0, 0.5, { step: 0.005, precision: 3, title: 'Edge Softness', description: 'Without a ramp: half the width of the blend between light and shade.' }),
+    shadows: animeNum(1, 0, 1, { title: 'Cast Shadows', description: 'How much shadows cast on it turn it to shade (0: it takes none).' }),
+    rampMap: asset({
+        title: 'Ramp',
+        description: 'Ramp texture asset (read as data), from full shade (left) to full light (right): its alpha is how lit the surface is there and its colors tint the surface around the edge without changing its brightness.',
+    }).optional(),
+    shadeLut: asset({
+        title: 'Shade Table',
+        description: 'Color table (texture asset, read as data) that gives every base color its color in shade, in place of Shade Brightness and Saturation: N slices of N by N texels side by side, N being the '
+            + 'texture\'s height (blue from slice to slice, red across a slice, green upward), laid out over sRGB colors.',
+    }).optional(),
+    edge: animeNum(0, 0, 1, { title: 'Edge Tint', description: 'Skin and faces: how much the lit color turns to Edge Tint Color where the surface turns away from the camera. 0 for none.' }),
+    edgeColor: animeVec([0.58, 0.28, 0.2], { title: 'Edge Tint Color', description: 'Multiplies the lit color toward the silhouette (linear).' }),
+    edgeMasked: animeNum(1, 0, 1, { title: 'Edge Tint Off Mask', description: 'Faces: Edge Tint where the face mask\'s blue is off.' }),
+    light: animeNum(1, 0, 4, { title: 'Light Color', description: 'Multiplies the color of the key light on it (its intensity is the light\'s own).' }),
+    lightTint: animeVec([1, 1, 1], { title: 'Light Tint', description: 'Tints the key light on it (linear), after Light Color: a warmer light on skin than on clothes.' }),
+    toneCurve: bool(false, {
+        title: 'Own Tone Curve',
+        description: 'Maps the color to the screen with the character\'s own filmic curve (in wide gamut; it takes much of the saturation out of bright colors, which Saturate Brights and skin\'s own step give back in part) in the material. For scenes whose tone mapping is Display.',
+    }).optional(),
+    saturateLit: bool(true, { title: 'Saturate Brights', description: 'Bright lit colors gain a little saturation, so the tone curve does not wash them out.' }).optional(),
+    highlight: oneOf(ANIME_HIGHLIGHTS, 'ggx', {
+        title: 'Highlight',
+        labels: { ggx: 'GGX', toon: 'Toon', none: 'None' },
+        description: 'Cloth: ggx, a GGX lobe of the roughness (its reflectance from Reflectance and Metallic, colored by the highlight ramp); toon, a spot cut at the key light\'s highlight half width, in the surface\'s own color, times Highlight Strength. '
+            + 'Skin, faces and hair have their own; eyes none.',
+    }).optional(),
+    reflectance: animeNum(1, 0, 1, { title: 'Reflectance', description: 'Highlight strength of what is not metal (GGX: 4% reflectance at 1; Toon: scales the spot). A toon mask map\'s green takes its place.' }),
+    specular: animeNum(0.4, 0, 4, { title: 'Highlight Strength', description: 'Brightness of the toon highlight, and of a hair highlight without strand lobes.' }),
+    specularMap: asset({ title: 'Highlight Ramp', description: 'Gradient (texture asset, read as data) that colors the highlight: across from its edge (left) to its center (right), down from rough or not metal (top) to smooth or metal (bottom); on hair, down from facing the camera (top) to turned away.' }).optional(),
+    normalLayout: oneOf(ANIME_NORMAL_LAYOUTS, 'rgb', {
+        title: 'Normal Map Layout',
+        labels: { rgb: 'RGB', ag: 'AG (packed)', split: 'RG + BA (two normals)' },
+        description: 'How the normal map stores directions. rgb: x and y in red and green. ag: x in alpha (times red), y in green. split: one normal in red and green for the shading, a second in blue and alpha for highlights (hair).',
+    }).optional(),
+    normalScale2: animeNum(1, 0, 2, { title: 'Highlight Normal Scale', description: 'Split normal maps: strength of the highlight normal (blue and alpha).' }),
+    maskLayout: oneOf(ANIME_MASK_LAYOUTS, 'orm', {
+        title: 'Mask Map Layout',
+        labels: { orm: 'Roughness G, Metal B (glTF)', toon: 'Metal R, Reflectance G, Light B, Smooth A' },
+        description: 'What the metallic-roughness map holds. orm (glTF): roughness in green, metallic in blue. toon: metallic in red, reflectance (highlight strength) in green, a light mask in blue (0 stays in shade), '
+            + 'smoothness in alpha; on hair red is how much the strands follow the mesh\'s V direction (along the hair cards).',
+    }).optional(),
+    faceMap: asset({
+        title: 'Face Shadow Map',
+        description: 'Face shadow map (texture asset, read as data): red and green averaged give the light\'s angle around the head at which a texel turns from shade to light '
+            + '(paint both channels; a map in one channel only reads at half). Painted for a light from the face\'s left; light from the right reads it mirrored.',
+    }).optional(),
+    faceMaskMap: asset({ title: 'Face Mask', description: 'Texture asset over the face: red where Edge Tint applies, green where normals shade the face instead of the face shadow map (neck, ears), blue where cast shadows fall on it.' }).optional(),
+    faceGlowMap: asset({ title: 'Face Glow', description: 'Texture asset added over the lit face (a glow on the nose and cheeks), slid sideways as the camera turns.' }).optional(),
+    faceGlowShift: animeNum(0, -0.5, 0.5, { step: 0.001, precision: 3, title: 'Face Glow Shift', description: 'How far the face glow slides across the texture as the camera turns around the head.' }),
+    hair: animeNum(0, 0, 4, { title: 'Hair Highlight', description: 'Strength of the main highlight lobe across the hair strands (the toon mask\'s green says where it may show); 0 for none.' }),
+    hairShift: animeNum(0.5, 0, 1, { title: 'Hair Highlight Shift', description: 'Moves the main lobe along the strands: above 0.5 toward the tips, below toward the roots.' }),
+    hairShift2: animeNum(0.5, 0, 1, { title: 'Hair Second Shift', description: 'Moves the second lobe along the strands: above 0.5 toward the tips, below toward the roots.' }),
+    hairFacing: animeNum(1, 0, 16, { step: 0.1, precision: 2, slider: false, title: 'Hair Facing', description: 'How sharply the hair highlights fade where the hair turns from the camera around the head.' }),
+    hairColor2: animeVec([0, 0, 0], { title: 'Hair Second Color', description: 'Color of the second, wider lobe (linear); black for none.' }),
+    hairPower2: animeNum(120, 1, 400, { step: 1, precision: 0, slider: false, title: 'Hair Second Sharpness', description: 'Exponent of the second lobe: higher is narrower.' }),
+    hairTilt: animeNum(0, -1, 1, { title: 'Hair Tilt', description: 'Leans the strands\' direction toward the head\'s right.' }),
+    hairMap: asset({ title: 'Strand Map', description: 'Texture asset (red, read as data) of the lines between strands, bright on a line: they darken the hair along the strand band.' }).optional(),
+    hairRepeat: vec2([1, 1], { title: 'Strand Map Repeat' }).optional(),
+    hairOffset: vec2([0, 0], { title: 'Strand Map Offset' }).optional(),
+    hairStrand: animeNum(0, 0, 1, { title: 'Strand Breakup', description: 'How much the strands break the color up along the highlight band; 0 for none.' }),
+    hairStrandMix: animeNum(1, 0, 1, { title: 'Strand Source', description: '0 the Strand Comb\'s stripes, 1 the strand map; a source that is missing reads flat, so the band darkens evenly.' }),
+    hairComb: animeNum(0, 0, 1000, { step: 1, precision: 0, slider: false, title: 'Strand Comb', description: 'Number of stripes repeating across U (lines running along V) for the strand breakup without a map.' }),
+    hairStrandShift: animeNum(0.5, 0, 1, { title: 'Strand Band Shift', description: 'Moves the band the strands show in along them (at 0.5 a little toward the tips, as the highlight shifts are).' }),
+    hairStrandPower: animeNum(1, 0, 400, { step: 0.5, precision: 1, slider: false, title: 'Strand Band Sharpness', description: 'Exponent of the band the strands show in.' }),
+    hairStrandSaturation: animeNum(1, 0, 5, { title: 'Strand Saturation', description: 'Saturation of the hair where the strands darken it.' }),
+    irisCircle: bool(false, { title: 'Iris Circle', description: 'Eyes: the iris is the circle filling its UV tile; it sits back behind the surface (Iris Depth) under a raised cornea (Iris Bulge), and the matcap shows on it only.' }).optional(),
+    irisTint: animeVec([1, 1, 1], { title: 'Outside Iris Tint', description: 'Eyes: multiplies the color outside the iris circle (linear, may be above 1).' }),
+    irisAlphaTint: animeVec([1, 1, 1], { title: 'Iris Alpha Tint', description: 'Eyes with an iris circle: multiplies the color in as far as the base map\'s alpha goes, all of it at alpha 1 (linear, may be above 1).' }),
+    irisBulge: animeNum(0.8, 0, 4, { title: 'Iris Bulge', description: 'Eyes: how high the cornea rises over the iris circle, as a sphere cap (0 flat, 1 a half sphere; above 1 a smaller cap whose rim falls inside the circle); it spreads the matcap\'s reflection.' }),
+    irisParallax: animeNum(0, 0, 1, { step: 0.001, precision: 3, title: 'Iris Depth', description: 'Eyes: how far the iris texture slides with the view (it sits behind the surface).' }),
+    matcapMap: asset({ title: 'Matcap', description: 'Matcap texture asset (a lit sphere seen from the camera), added over the iris.' }).optional(),
+    matcap: animeNum(1, 0, 4, { title: 'Matcap Strength', description: 'Scales the matcap\'s color added over the iris (its alpha brings the Matcap Alpha Color).' }),
+    matcapColor: animeVec([0, 0, 0], { title: 'Matcap Alpha Color', description: 'Color added where the matcap\'s alpha is (linear).' }),
+    alphaDarken: animeNum(0, 0, 1, { title: 'Alpha Darkens', description: 'How much the base map\'s alpha darkens the color.' }),
+    overlayMap: asset({ title: 'Overlay Mask', description: 'Overlays: texture asset (red, read as data) of where it darkens, times the opacity; none darkens all of it.' }).optional(),
+    outline: animeNum(0.45, 0, 5, { title: 'Outline', description: 'Width of the outline (1 is 1.25 mm at a meter\'s distance, a little wider farther off as it thins slower than the view: about 1.8 mm at 4.5 m; never under a quarter of a pixel); 0 for none, also on see-through materials.' }),
+    outlineDepth: animeNum(0, 0, 1, { step: 0.005, precision: 3, slider: false, title: 'Outline Depth', description: 'How far the outline is pushed from the camera (a tenth of a meter at 1), which hides lines inside the silhouette.' }),
+    outlineBrightness: animeNum(0.45, 0, 2, { title: 'Outline Brightness', description: 'Brightness of the outline\'s color, made from the base color.' }),
+    outlineSaturation: animeNum(1.4, 0, 3, { title: 'Outline Saturation', description: 'Saturation of the outline\'s color, made from the base color.' }),
+    outlineLit: bool(true, { title: 'Lit Outline', description: 'The outline is lit and shaded as the surface is (else its color as it is).' }).optional(),
+    outlineNormals: oneOf(ANIME_OUTLINE_NORMALS, 'mesh', {
+        title: 'Outline Direction',
+        labels: { mesh: 'Mesh Normals', baked: 'Baked', tangent: 'Baked (tangent space)' },
+        description: 'Which way the outline goes out. mesh: along the mesh\'s normals (it splits open at hard edges). baked: along the model\'s outline vertex attribute (_OUTLINE as character files carry it, or _OUTLINE_NORMAL), a smoothed normal in the mesh\'s own space. '
+            + 'tangent: the attribute holds that normal in the tangent frame (x along the tangent, y the bitangent, z the normal; the model needs tangents). A vertex without one goes along its normal.',
+    }).optional(),
+    outlineMap: asset({ title: 'Outline Map', description: 'Texture asset read at every vertex: red scales the outline\'s width there (0 for none), green its depth.' }).optional(),
+    front: oneOf(ANIME_AXES, '+z', {
+        title: 'Front Axis',
+        labels: { '+z': '+Z', '-z': '-Z', '+x': '+X', '-x': '-X', '+y': '+Y', '-y': '-Y' },
+        description: 'The axis of the mesh the head faces along (glTF and VRM 1 models face +Z, VRM 0 models -Z; a mesh built Z-up faces -Y or +Y).',
+    }).optional(),
+    up: oneOf(ANIME_UP_AXES, '+y', {
+        title: 'Up Axis',
+        labels: { '+y': '+Y', '+z': '+Z' },
+        description: 'The axis of the mesh that points up the head: +Y, or +Z for a skinned mesh whose vertices are stored Z-up (its skin turns it upright).',
+    }).optional(),
+    frontTilt: animeNum(0, -45, 45, { step: 0.01, precision: 2, slider: false, title: 'Face Front Tilt', description: 'Degrees the face\'s front (for the face shadow map) leans down from the Front Axis.' }),
+});
+export type AnimeDoc = z.output<typeof Anime>;
+export type AnimeKind = AnimeDoc['kind'];
 
 /**
  * Surface materials. 'lit' is the engine's PBR material (LitMaterial),
  * 'unlit' ignores lights (UnLitMaterial), 'lambert' is a cheap matte
- * material lit by directional lights (LambertMaterial) and 'shader' renders
+ * material lit by directional lights (LambertMaterial), 'anime' is cel
+ * shading with an outline (its `anime` settings) and 'shader' renders
  * with a custom WGSL material shader. The optional fields mean their
  * default when missing.
  */
 export const Material = z.object({
-    type: oneOf(MATERIAL_TYPES, 'lit', { description: 'lit = PBR (LitMaterial), unlit = ignores lights, lambert = cheap matte (directional lights only), shader = custom WGSL shader.' }),
+    type: oneOf(MATERIAL_TYPES, 'lit', { description: 'lit = PBR (LitMaterial), unlit = ignores lights, lambert = cheap matte (directional lights only), anime = cel shading with an outline for characters (set its anime fields), shader = custom WGSL shader.' }),
     color: color('#c8c8c8', { description: 'Base color.' }),
     opacity: unit(1),
     metallic: unit(0),
@@ -90,6 +241,8 @@ export const Material = z.object({
     thickness: num(0, 0, Infinity, { step: 0.01, precision: 3, description: 'Lit only: thickness of the volume behind a transmissive surface.' }).optional(),
     attenuationColor: color('#ffffff', { title: 'Tint', description: 'Lit only: color light turns into while it travels through the volume.' }).optional(),
     attenuationDistance: num(0, 0, Infinity, { title: 'Tint Distance', description: 'Lit only: distance at which light in the volume reaches the tint color; 0 means no tint.' }).optional(),
+    /** Cel shading settings, used when `type` is 'anime' (also its normal, metallic-roughness, occlusion and emission maps and values). */
+    anime: Anime.optional().meta({ description: 'Anime only: the cel shading (kind, shade, highlight, rim, outline, face and hair). Fields left out take the kind\'s values.' }),
     /** Material slot (DesignDoc.materials): setting its swatch rewrites the material of every mesh in the slot. */
     slot: z.string().min(1).optional().catch(undefined),
 });
@@ -105,19 +258,58 @@ export type MeshDoc = z.output<typeof Mesh>;
 /**
  * Shading model for a material slot of an imported model: 'model' keeps the
  * file's own PBR material, 'unlit' and 'lambert' replace it with the engine
- * material of that name (keeping the file's color texture).
+ * material of that name (keeping the file's color texture), 'anime' with
+ * cel shading (keeping the file's color, normal, metallic-roughness,
+ * occlusion and emission maps).
  */
-export const SLOT_SHADINGS = ['model', 'unlit', 'lambert'] as const;
+export const SLOT_SHADINGS = ['model', 'unlit', 'lambert', 'anime'] as const;
+
+/** Compare functions of the depth and stencil tests (WebGPU's). */
+export const COMPARE_FUNCTIONS = ['always', 'never', 'less', 'less-equal', 'equal', 'not-equal', 'greater', 'greater-equal'] as const;
+/** What a passing stencil test does to the stencil value (WebGPU's operations). */
+export const STENCIL_OPS = ['keep', 'replace', 'zero', 'invert', 'increment-clamp', 'decrement-clamp', 'increment-wrap', 'decrement-wrap'] as const;
+
+/** A stencil test: (stencil & read) compared with (ref & read); where it and the depth test pass, `pass` writes the bits of `write`. */
+export const StencilTest = z.object({
+    ref: int(0, 0, 255),
+    read: int(255, 0, 255),
+    write: int(255, 0, 255),
+    compare: oneOf(COMPARE_FUNCTIONS, 'always'),
+    pass: oneOf(STENCIL_OPS, 'keep'),
+});
+export type StencilTestDoc = z.output<typeof StencilTest>;
+
+/**
+ * How a slot's material draws, past what its alpha mode says: for layered
+ * character materials (eyes seen through hair, shadows painted onto a face).
+ * order: draw order; from 3000 on it draws after every opaque material,
+ * sorted by order. Stencil tests need the scene's stencil buffer
+ * (Environment ▸ Stencil). The outline fields are the anime outline's pass.
+ */
+export const SlotPass = z.object({
+    order: z.number().int().min(0).max(5000).optional().catch(undefined),
+    depthCompare: z.enum(COMPARE_FUNCTIONS).optional().catch(undefined),
+    depthWrite: z.boolean().optional().catch(undefined),
+    /** Depth offset, in the depth buffer's smallest steps, and by the slope (as a polygon offset's units and factor). */
+    depthBias: z.number().optional().catch(undefined),
+    depthBiasSlope: z.number().optional().catch(undefined),
+    stencil: StencilTest.optional().catch(undefined),
+    outlineDepthCompare: z.enum(COMPARE_FUNCTIONS).optional().catch(undefined),
+    outlineStencil: StencilTest.optional().catch(undefined),
+});
+export type SlotPassDoc = z.output<typeof SlotPass>;
 
 /** Per-instance change to one material slot of an imported model: a missing field keeps the file's value. */
 export const MaterialOverride = z.object({
     ...optionalFields(Material.shape, [
         'color', 'opacity', 'metallic', 'roughness', 'emissive', 'emissiveIntensity', 'doubleSide', 'map', 'shader', 'alphaMode', 'alphaCutoff', 'normalScale',
-        'clearcoat', 'clearcoatRoughness', 'transmission', 'ior',
+        'clearcoat', 'clearcoatRoughness', 'transmission', 'ior', 'anime',
     ]),
     params: Material.shape.params,
     /** Built-in shading model replacing the file's material (a shader takes precedence); missing means 'model'. */
-    shading: z.enum(SLOT_SHADINGS).optional().catch(undefined).meta({ description: 'Built-in shading; "model" is the file\'s material. Ignored while a shader is set.' }),
+    shading: z.enum(SLOT_SHADINGS).optional().catch(undefined).meta({ description: 'Built-in shading; "model" is the file\'s material, "anime" cel shading with an outline (its anime fields). Ignored while a shader is set.' }),
+    /** Draw order, depth and stencil tests of its passes (advanced). */
+    pass: SlotPass.optional().catch(undefined),
 });
 export type MaterialOverride = z.output<typeof MaterialOverride>;
 export type SlotShading = (typeof SLOT_SHADINGS)[number];
@@ -136,6 +328,45 @@ export const PartOverride = z.object({
 });
 export type PartOverride = z.output<typeof PartOverride>;
 
+/**
+ * Who made a character and what others may do with it: the license data of
+ * the character format v1 (MGL_character.meta, VRM 1.0's fields and three of
+ * its own). It comes from the file (or, for a converted model, starts as
+ * restrictive as it gets, with the original's terms kept as written) and goes
+ * into the character files the editor writes.
+ */
+export const CharacterInfo = z.object({
+    name: text('', 200, { description: 'The character\'s name.' }),
+    version: text('', 60, {}),
+    authors: text('', 400, { description: 'Who made it, separated by commas (required).' }),
+    copyrightInformation: text('', 400, { title: 'Copyright' }),
+    contactInformation: text('', 400, { title: 'Contact' }),
+    licenseUrl: text('', 400, { title: 'License URL', description: 'Where its license is written (required).' }),
+    avatarPermission: oneOf(['onlyAuthor', 'onlySeparatelyLicensedPerson', 'everyone'], 'onlyAuthor', {
+        title: 'Who May Use It',
+        labels: { onlyAuthor: 'Only the authors', onlySeparatelyLicensedPerson: 'Licensed people', everyone: 'Everyone' },
+    }),
+    commercialUsage: oneOf(['personalNonProfit', 'personalProfit', 'corporation'], 'personalNonProfit', {
+        title: 'Commercial Use',
+        labels: { personalNonProfit: 'Personal, non-profit', personalProfit: 'Personal, for profit', corporation: 'Companies too' },
+    }),
+    creditNotation: oneOf(['required', 'unnecessary'], 'required', { title: 'Credit' }),
+    allowRedistribution: bool(false, { title: 'Redistribution', description: 'Others may pass the file on.' }),
+    modification: oneOf(['prohibited', 'allowModification', 'allowModificationRedistribution'], 'prohibited', {
+        labels: { prohibited: 'Prohibited', allowModification: 'Allowed', allowModificationRedistribution: 'Allowed, and passing it on' },
+    }),
+    allowExcessivelyViolentUsage: bool(false, { title: 'Violent Use' }),
+    allowExcessivelySexualUsage: bool(false, { title: 'Sexual Use' }),
+    allowPoliticalOrReligiousUsage: bool(false, { title: 'Political Use', description: 'Political or religious use.' }),
+    allowAntisocialOrHateUsage: bool(false, { title: 'Hateful Use', description: 'Antisocial or hateful use.' }),
+    partExtraction: bool(false, { title: 'Part Extraction', description: 'Parts of it (hair, clothes) may be taken onto other models.' }),
+    otherLicenseUrl: text('', 400, { title: 'Other License URL' }),
+    originalWork: text('', 200, { title: 'Original Work', description: 'For a derivative: the work it comes from.' }),
+    rightsHolder: text('', 200, { title: 'Rights Holder', description: 'For a derivative: who holds the original\'s rights.' }),
+    sourceTerms: text('', 8000, { title: 'Source Terms', description: 'The original\'s terms of use, as its authors wrote them.' }),
+});
+export type CharacterInfoDoc = z.output<typeof CharacterInfo>;
+
 export const Model = z.object({
     /** Model asset id (a .glb / .gltf blob stored in IndexedDB). */
     asset: z.string().catch(''),
@@ -143,6 +374,8 @@ export const Model = z.object({
     materials: records(MaterialOverride).optional(),
     /** Mesh part overrides keyed by part path (see engine/modelParts.ts). */
     parts: records(PartOverride).optional(),
+    /** The character's license data, for the character files it is written to. */
+    character: CharacterInfo.optional().catch(undefined),
 });
 export type ModelDoc = z.output<typeof Model>;
 
@@ -173,6 +406,10 @@ export const LightShadow = group({
     }),
     cascades: int(4, 2, 4, { description: 'Directional lights with cascades: how many maps. Two draw half as much as four; four keep the far shadows sharper.' }),
     range: num(60, 5, 1000, { step: 1, precision: 0, description: 'Directional lights: meters the shadow covers. A larger range is blurrier (with cascades only far away).' }),
+    area: vec2([0, 0], {
+        title: 'Area Size',
+        description: 'Directional lights covering the area around the light: its width and height across the light, meters, in place of Range (which then only reaches toward and away from the light). 0 uses Range. A box fitted to a character gives it sharp shadows.',
+    }).optional(),
 });
 export type LightShadowDoc = z.output<typeof LightShadow>;
 
@@ -318,6 +555,63 @@ export const Animation = z.object({
     ...Object.fromEntries(ANIMATION_MODES.map((m) => [m, modeClip(m)])) as Record<(typeof ANIMATION_MODES)[number], ReturnType<typeof modeClip>>,
 });
 export type AnimationDoc = z.output<typeof Animation>;
+
+// ------------------------------------------- motion on top of the clip (springs, face)
+
+const listOf = <S extends z.ZodObject>(s: S, max: number) =>
+    z.array(s).max(max).catch((c) => (Array.isArray(c?.value) ? c.value.slice(0, max).map((x: unknown) => s.parse(x && typeof x === 'object' ? x : {})) : []));
+
+/**
+ * Bones that swing behind the body's motion: hair, ribbons, coat tails.
+ * Each bone of the group pulls back to where the clip (or its rest pose) has
+ * it, as a spring; it is set by how the swing should look, not by forces, so
+ * short and long bones of one group swing alike.
+ */
+export const SpringGroup = z.object({
+    bones: text('', 400, { description: 'The bones of the group: names separated by commas or spaces, * for any run of characters (hair_*, skirt_*_jnt). A bone in two groups belongs to the first.' }),
+    chains: text('', 4000, { description: 'Bones that start chains: each swings with every bone under it (names as in Bones). A character file\'s spring chains come in this way.' }),
+    period: num(0.8, 0.05, 5, { step: 0.05, description: 'Seconds of one swing: longer swings slower and softer.' }),
+    damping: unit(0.5, { description: 'How fast the swing dies: 0.3 swings a few times, 0.7 settles almost at once.' }),
+    gravity: num(0.1, 0, 2, { step: 0.01, description: 'How far the bones sag, against the pull back to their pose: 0 not at all.' }),
+    drag: num(0.3, 0, 10, { step: 0.05, description: 'How fast the bones lose the speed of the body carrying them (air): higher keeps hair from streaming behind.' }),
+    limit: num(45, 0, 180, { step: 1, description: 'The widest a bone turns from its pose, degrees.' }),
+    radius: num(0.01, 0, 0.5, { step: 0.001, precision: 3, description: 'Thickness of the bones against the colliders, meters.' }),
+    hit: text('', 400, { description: 'The colliders the group stays out of: their set names (separated by commas or spaces); empty for none.' }),
+});
+export type SpringGroupDoc = z.output<typeof SpringGroup>;
+
+/** What swinging bones stay out of: a ball around a bone, or a capsule from it to another bone. */
+export const SpringCollider = z.object({
+    set: text('body', 60, { description: 'The set it belongs to (a spring group names the set it hits).' }),
+    bone: text('', 200, { description: 'The bone it follows.' }),
+    to: text('', 200, { description: 'A second bone: the collider is the capsule between the two; empty for a ball.' }),
+    radius: num(0.05, 0, 2, { step: 0.005, precision: 3, description: 'Meters.' }),
+    offset: vec3([0, 0, 0], { precision: 3, description: 'A ball\'s center from the bone, meters, in the model\'s own axes at rest.' }),
+    tail: vec3([0, 0, 0], { precision: 3, description: 'Without a second bone: a capsule\'s other end from the bone (meters, the model\'s axes at rest); zero is a ball.' }),
+});
+export type SpringColliderDoc = z.output<typeof SpringCollider>;
+
+/** How far each bone of a face moves in one expression: meters by bone name, in the model's own axes at rest. */
+const Expression = z.record(z.string(), z.tuple([z.number(), z.number(), z.number()])).catch((c) =>
+    Object.fromEntries(Object.entries(c?.value && typeof c.value === 'object' ? c.value : {}).filter(([, v]) => Array.isArray(v) && v.length === 3 && v.every((x) => typeof x === 'number' && Number.isFinite(x)))),
+);
+
+/**
+ * Motion of a model's skeleton on top of its clip: bones that swing behind
+ * the body (`springs`, kept out of `colliders`), and a face moved by its
+ * bones: `expressions` are named poses, each a set of offsets of face bones
+ * from their rest position; `expression` is the one shown (it blends in),
+ * and the expression named `blink` closes the eyes now and then.
+ */
+export const Motion = z.object({
+    sway: bool(true, { description: 'The spring groups move; off, their bones follow the clip stiffly.' }),
+    springs: listOf(SpringGroup, 32),
+    colliders: listOf(SpringCollider, 64),
+    expression: text('', 80, { description: 'The expression shown, by name; empty for the rest face.' }),
+    blink: bool(true, { description: 'Blinks every few seconds, with the expression named "blink".' }),
+    expressions: z.record(z.string(), Expression).catch((c) => Object.fromEntries(Object.entries(c?.value && typeof c.value === 'object' ? c.value : {}).map(([k, v]) => [k, Expression.parse(v)]))),
+});
+export type MotionDoc = z.output<typeof Motion>;
 
 // --------------------------------------------------- mirrors, grass, instancing
 
@@ -680,7 +974,18 @@ export const Environment = z.object({
     }),
     /** Tonemap exposure. */
     exposure: num(1, 0, 4, { step: 0.01, slider: true }),
+    toneMapping: oneOf(TONE_MAPPINGS, 'filmic', {
+        title: 'Tone Mapping',
+        labels: { filmic: 'Filmic (ACES)', none: 'None', display: 'Display' },
+        description: 'How the scene\'s light is mapped to the screen. filmic: an ACES curve. none: as it is (cut at white). display: materials write display colors themselves and blend as such '
+            + '(anime materials with Own Tone Curve, as characters made in a display color space are); lit materials look dark in it.',
+    }),
     fxaa: bool(true, { title: 'Anti-aliasing', description: 'FXAA.' }),
+    msaa: bool(false, { title: 'Multisampling', description: 'Smooths edges with four samples a pixel (in place of FXAA\'s blur along them). Takes effect after the editor or game starts again.' }),
+    stencil: bool(false, {
+        title: 'Stencil Buffer',
+        description: 'A stencil buffer for materials whose slots use stencil tests (eyes seen through hair). It turns the depth prepass off. Takes effect after the editor or game starts again.',
+    }),
     fxaaSpan: int(4, 1, 8, {
         title: 'FXAA Reach',
         description: 'Budget: pixels FXAA blends along an edge (4 by default). Lower keeps fine detail and text sharper, higher smooths long shallow edges better. FXAA is one full-screen pass of nine samples a pixel at any reach: its budget is mostly on or off.',

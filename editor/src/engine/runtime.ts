@@ -31,6 +31,27 @@ export const VIEWPORT_FPS: { value: ViewportFps; label: string }[] = [
 
 /** The screen's pixels per CSS pixel, as the engine uses them (at most 2). */
 const screenRatio = () => Math.min(window.devicePixelRatio || 1, 2);
+
+/** Where the scene's multisampling and stencil buffer wait for the next start (Environment ▸ Multisampling, Stencil Buffer). */
+const RENDER_START_KEY = 'morglay:renderStart';
+
+/** The render targets the engine starts with: as the last scene asked. */
+export function renderStart(): { msaa: boolean; stencil: boolean } {
+    try {
+        const v = JSON.parse(localStorage.getItem(RENDER_START_KEY) ?? '{}');
+        return { msaa: !!v?.msaa, stencil: !!v?.stencil };
+    } catch {
+        return { msaa: false, stencil: false };
+    }
+}
+
+function saveRenderStart(v: { msaa: boolean; stencil: boolean }) {
+    try {
+        localStorage.setItem(RENDER_START_KEY, JSON.stringify(v));
+    } catch {
+        // Without storage the engine keeps its defaults.
+    }
+}
 /** How long a capture waits for the browser's frames before drawing them itself. */
 const FRAME_WAIT_MS = 2000;
 
@@ -43,6 +64,9 @@ export const VIEWPORT_QUALITY: { value: ViewportQuality; name: string; detail: s
     { value: 'low', name: 'Low', detail: 'half resolution', ratio: () => Math.min(screenRatio(), Math.max(0.75, screenRatio() * 0.5)) },
     { value: 'medium', name: 'Medium', detail: 'three quarters', ratio: () => Math.min(screenRatio(), Math.max(1, screenRatio() * 0.75)) },
     { value: 'high', name: 'High', detail: 'full resolution', ratio: screenRatio },
+    // Twice the pixels each way (at most three per CSS pixel), shown at the canvas's size: four
+    // samples a pixel averaged, so edges and hairline outlines come out smooth, at four times the cost.
+    { value: 'ultra', name: 'Ultra', detail: 'supersampled, smooth edges', ratio: () => Math.min(3, screenRatio() * 2) },
 ];
 
 /**
@@ -162,9 +186,12 @@ export class Runtime {
         if (stats) RenderGraph.passHook = { begin: (name) => stats.passBegin(name), end: (name) => stats.passEnd(name) };
         const quality = opts.quality ?? 'high';
         const tier = QUALITY[quality];
+        // Multisampling and the stencil buffer shape the render targets: they are set as the engine starts.
+        const start = renderStart();
         const engine = await Engine3D.init({
             canvasConfig: { canvas },
             setting: {
+                render: { msaa: start.msaa ? 4 : 0, useStencil: start.stencil, ...(start.stencil ? { zPrePass: false } : {}) } as any,
                 // The editor does its own ray picking against the document.
                 pick: { enable: false },
                 // Each light sizes its own shadow map (engine/shadows.ts), up
@@ -373,9 +400,31 @@ export class Runtime {
      */
     private fitShadowLights() {
         const tier = QUALITY[this.qualityLevel];
+        const seen = new Set<LightBase>();
         for (const l of EntityCollect.instance.getLights(this.scene)) {
-            if (l instanceof LightBase && l.castShadow) fitLightShadow(l, tier);
+            if (!(l instanceof LightBase)) continue;
+            seen.add(l);
+            if (l.castShadow) fitLightShadow(l, tier);
         }
+        // The scene's own lights, whether or not the engine's list holds them.
+        for (const l of this.sceneLights) {
+            if (!l.object3D?.transform?.scene3D) {
+                this.sceneLights.delete(l);
+                continue;
+            }
+            if (!seen.has(l) && l.castShadow) fitLightShadow(l, tier);
+        }
+    }
+
+    /** The lights the scene document made (SceneSync): their shadow settings are fitted every frame. */
+    private sceneLights = new Set<LightBase>();
+
+    trackLight(l: LightBase) {
+        this.sceneLights.add(l);
+    }
+
+    untrackLight(l: LightBase) {
+        this.sceneLights.delete(l);
     }
 
     /**
@@ -446,6 +495,12 @@ export class Runtime {
 
         const setting = this.engine.setting;
         setting.render.tonemap.exposure = env.exposure;
+        setting.render.tonemap.mode = env.toneMapping === 'none' ? 'None' : env.toneMapping === 'display' ? 'Display' : 'ACES';
+        // What the next start sets up: the render targets of this one stay.
+        const wanted = { msaa: !!env.msaa, stencil: !!env.stencil };
+        const now = { msaa: (setting.render.msaa | 0) > 0, stencil: !!setting.render.useStencil };
+        saveRenderStart(wanted);
+        if (wanted.msaa !== now.msaa || wanted.stencil !== now.stencil) console.info('[editor] Multisampling and the stencil buffer change when the editor starts again.');
         if (!this.applySky(env)) {
             // Retry once the previous sky has started (see applySky).
             this.pendingEnv = env;

@@ -3,6 +3,7 @@
 // shader code. Every question about them goes through this one walk: what a file
 // must carry, whether something is in use, and what deleting it clears.
 
+import { ANIME_MAP_KEYS, animeMapRole, type AnimeMapKey } from './anime';
 import type { MaterialDoc, ParamValue, SceneDoc, TextureRole } from './types';
 
 export type RefKind = 'asset' | 'shader' | 'script';
@@ -57,10 +58,16 @@ export function refs(doc: SceneDoc): Ref[] {
             if (typeof v === 'string' && known.has(v)) out.push({ kind: 'asset', id: v, at, role: roles?.get(name) ?? 'color', drop: () => delete values![name] });
         }
     };
+    // The cel shading's own maps (ramp, color table, face shadow, matcap...) of a material or a model's slot.
+    const animeMaps = (a: Partial<Record<AnimeMapKey, string | null>> | undefined) => {
+        if (!a) return;
+        for (const key of ANIME_MAP_KEYS) if (a[key]) out.push({ kind: 'asset', id: a[key]!, at: 'object', role: animeMapRole(key, a), drop: () => delete a[key] });
+    };
     for (const n of [...doc.nodes, ...doc.prefabs.flatMap((p) => p.nodes)]) {
         const m = n.mesh?.material;
         if (m) {
             for (const key of MAPS) if (m[key]) out.push({ kind: 'asset', id: m[key]!, at: 'object', role: MAP_ROLES[key], drop: () => (m[key] = null) });
+            animeMaps(m.anime);
             if (m.shader) {
                 out.push({
                     kind: 'shader',
@@ -78,6 +85,7 @@ export function refs(doc: SceneDoc): Ref[] {
         if (n.model?.asset) out.push({ kind: 'asset', id: n.model.asset, at: 'object', role: 'model' });
         for (const o of Object.values(n.model?.materials ?? {})) {
             if (o.map) out.push({ kind: 'asset', id: o.map, at: 'object', role: 'color', drop: () => delete o.map });
+            animeMaps(o.anime);
             if (o.shader) {
                 out.push({
                     kind: 'shader',

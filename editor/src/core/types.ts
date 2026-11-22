@@ -4,7 +4,7 @@
 
 import type { Vec3 } from './math';
 import type {
-    AnimationDoc, AudioSourceDoc, BodyDoc, CameraDoc, CharacterDoc, EnvironmentDoc, GrassDoc, InstancingDoc, LightDoc, MeshDoc, MirrorDoc, ModelDoc, ParticlesDoc, PlayerDoc, RainDoc,
+    AnimationDoc, AudioSourceDoc, BodyDoc, CameraDoc, CharacterDoc, EnvironmentDoc, GrassDoc, InstancingDoc, LightDoc, MeshDoc, MirrorDoc, ModelDoc, MotionDoc, ParticlesDoc, PlayerDoc, RainDoc,
     ScatterDoc, SpecsDoc, TerrainDoc, TreeDoc,
 } from './model';
 
@@ -12,8 +12,8 @@ export type { Vec3 };
 
 // Components and settings defined by their schemas (core/model.ts).
 export type {
-    AlphaMode, AnimationDoc, AudioSourceDoc, BodyDoc, BodyType, CameraDoc, CharacterDoc, EnvironmentDoc, GeometryDoc, GeometryType, GIDoc, GrassDoc, InstancingDoc, LightDoc, LightType, RainDoc,
-    MaterialDoc, MaterialOverride, MaterialType, MeshDoc, MirrorDoc, ModelDoc, ParticleShape, ParticlesDoc, PartOverride, PlayerDoc, PlayerView, ScatterDoc, ScatterSourceDoc, SkyType,
+    AlphaMode, AnimationDoc, AnimeDoc, AnimeKind, AudioSourceDoc, BodyDoc, BodyType, CameraDoc, CharacterDoc, EnvironmentDoc, GeometryDoc, GeometryType, GIDoc, GrassDoc, InstancingDoc, LightDoc, LightType, RainDoc,
+    MaterialDoc, MaterialOverride, MaterialType, MeshDoc, MirrorDoc, ModelDoc, MotionDoc, ParticleShape, ParticlesDoc, PartOverride, PlayerDoc, PlayerView, ScatterDoc, ScatterSourceDoc, SkyType,
     SlotShading, SpecsDoc, TerrainDoc, TerrainLayerDoc, TreeDoc,
 } from './model';
 
@@ -55,6 +55,8 @@ export interface NodeDoc {
     body?: BodyDoc;
     /** Skeletal animation of the node's model: its clip, and a character's clip per mode. */
     animation?: AnimationDoc;
+    /** Motion of the model's skeleton on top of its clip: bones that swing as springs, and expressions of a face moved by its bones. */
+    motion?: MotionDoc;
     /** The mesh is a planar mirror: it shows the scene reflected in its plane. */
     mirror?: MirrorDoc;
     /** A field of grass blades around the object, standing on its ground object. */
@@ -154,9 +156,11 @@ export interface AssetMeta {
 /**
  * What a texture is to the materials using it: colors (sampled as sRGB),
  * a normal map, or other data (roughness, metalness, occlusion), which
- * compress differently.
+ * compress differently. A lookup is data read as exact numbers (ramps,
+ * color tables, face shadow thresholds): it is never block compressed and
+ * is filtered without anisotropy.
  */
-export type TextureRole = 'color' | 'normal' | 'data';
+export type TextureRole = 'color' | 'normal' | 'data' | 'lookup';
 
 /**
  * Compression of a texture asset, or of a model's textures (its geometry

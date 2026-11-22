@@ -89,4 +89,18 @@ export const MATERIAL_PRESETS: MaterialPreset[] = [
             delete m.params;
         },
     },
+    {
+        id: 'anime',
+        label: 'Anime (Cel)',
+        apply: (m) => {
+            // Cel shading over the color and maps it has; its kind and settings stay if it was one already.
+            m.type = 'anime';
+            m.shader = null;
+            delete m.params;
+            m.anime = { kind: m.anime?.kind ?? 'cloth', ...m.anime };
+            for (const k of ['clearcoat', 'clearcoatRoughness', 'transmission', 'ior', 'thickness', 'attenuationColor', 'attenuationDistance'] as const) {
+                delete m[k];
+            }
+        },
+    },
 ];

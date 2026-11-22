@@ -68,7 +68,8 @@ export function derivedKey(asset: string, role: DerivedRole): string {
 /** The encoding a texture of this role (or a model) gets with these options; null when it ships as it is. */
 export function derivedOptions(role: DerivedRole, c?: TextureCompression | null): DerivedOptions | null {
     const mode = c?.mode ?? 'auto';
-    if (mode === 'off') return null;
+    // Lookups are read as exact numbers: block compression would move them.
+    if (mode === 'off' || role === 'lookup') return null;
     const maxSize = c?.maxSize && c.maxSize > 0 ? Math.round(c.maxSize) : DEFAULT_MAX_SIZE;
     const colors = role === 'color' || role === 'model';
     const codec = mode === 'high' || !colors ? 'uastc' : 'etc1s';

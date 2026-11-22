@@ -1,0 +1,107 @@
+{
+  "name": "MGL shared texture library",
+  "specVersion": "1.0-draft",
+  "license": "CC0-1.0",
+  "note": "Made from formulas by editor/scripts/make-mgl-library.mjs; no image comes from anywhere else.",
+  "items": [
+    {
+      "uri": "library:ramp/soft",
+      "file": "ramp/soft.png",
+      "use": "rampMap",
+      "space": "linear",
+      "size": [
+        256,
+        1
+      ],
+      "description": "A soft edge: light fades into shade over a wide band."
+    },
+    {
+      "uri": "library:ramp/hard",
+      "file": "ramp/hard.png",
+      "use": "rampMap",
+      "space": "linear",
+      "size": [
+        256,
+        1
+      ],
+      "description": "A hard edge: one step from shade to light."
+    },
+    {
+      "uri": "library:ramp/skin",
+      "file": "ramp/skin.png",
+      "use": "rampMap",
+      "space": "linear",
+      "size": [
+        256,
+        1
+      ],
+      "description": "Skin: a fairly sharp edge with a warm red band along it, like light passing through skin."
+    },
+    {
+      "uri": "library:ramp/hair",
+      "file": "ramp/hair.png",
+      "use": "rampMap",
+      "space": "linear",
+      "size": [
+        256,
+        1
+      ],
+      "description": "Hair: a sharp edge (its slightly cool band shows only where a ramp's color is used, on skin and faces)."
+    },
+    {
+      "uri": "library:matcap/eye-clear",
+      "file": "matcap/eye-clear.png",
+      "use": "matcapMap",
+      "space": "srgb",
+      "size": [
+        256,
+        256
+      ],
+      "description": "For eyes (added): a clear window highlight up left and a small one down right."
+    },
+    {
+      "uri": "library:matcap/metal-soft",
+      "file": "matcap/metal-soft.png",
+      "use": "matcapMap",
+      "space": "srgb",
+      "size": [
+        256,
+        256
+      ],
+      "description": "A soft grey studio, bright above with a horizon line (the shading adds matcaps on eyes only: on a cornea it gives a dim, even reflection)."
+    },
+    {
+      "uri": "library:strand/fine",
+      "file": "strand/fine.png",
+      "use": "hairMap",
+      "space": "linear",
+      "size": [
+        256,
+        64
+      ],
+      "description": "Fine strands: many thin stripes (tile it about 8 times across)."
+    },
+    {
+      "uri": "library:strand/coarse",
+      "file": "strand/coarse.png",
+      "use": "hairMap",
+      "space": "linear",
+      "size": [
+        256,
+        64
+      ],
+      "description": "Coarse strands: a few broad locks."
+    },
+    {
+      "uri": "library:lut/skin-warm",
+      "file": "lut/skin-warm.png",
+      "use": "shadeLut",
+      "space": "linear",
+      "size": [
+        256,
+        16
+      ],
+      "description": "Skin shade colors: saturated and warm (a slot's Shade Table)."
+    }
+  ]
+}

@@ -1,8 +1,16 @@
 import { applyBehaviorOps, writeBehaviorChanges, type OpsMode, type OpsResult } from './core/behavior/ops';
 import { PARTICLE_PRESETS, presetParticles } from './core/particles';
 import { makeCharacterNode } from './core/character';
-import { formatBytes, kindOf, putAsset } from './core/assets';
+import { formatBytes, getAssetBlob, kindOf, putAsset } from './core/assets';
 import { externalUris, packGltf } from './core/gltfPack';
+import { convertPmx, isClipGlb } from './core/pmxImport';
+import { readMgl } from './core/mgl';
+import { infoFromMeta, mglExportInput, mglImportPlan } from './core/mglEditor';
+import { joinGlb, mglImage, mglImageUri, writeMgl, type MglImage } from './core/mglWrite';
+import { mglToVrm } from './core/vrm';
+import { ANIME_MAP_KEYS } from './core/anime';
+import { mapAnimeMaps } from './core/mglMaterial';
+import { LIBRARY_LICENSE, libraryFile, libraryUrl } from './core/mglLibrary';
 import { download as downloadFile, kindOfUrl, librarySource, urlFileName, type LibraryItem } from './core/library';
 import { deleteDerivedOf } from './core/derived';
 import { clampGIGrid, GI_MAX_PER_AXIS, giGridFits } from './core/giLimits';
@@ -13,7 +21,8 @@ import {
 } from './core/defaults';
 import { Emitter } from './core/events';
 import { ask, confirmDialog, toast } from './core/messages';
-import { AudioSource, Grass, Mirror, Rain, Scatter, ScatterSource } from './core/model';
+import { Animation as AnimationSchema, AudioSource, Grass, Mirror, Motion, Rain, Scatter, ScatterSource } from './core/model';
+import { addClipsToModel } from './core/clipImport';
 import { SPECIES_NAME, TREE_SPECIES, TREE_VARIANTS, variantIndex, variantSeed, type TreeSpecies } from './core/trees';
 import { defaults } from './core/schema';
 import { DEG, add, compose, decompose, eulerFromQuat, invert, len, mat4, mul, sub, tidy3, transformDir, transformPoint } from './core/math';
@@ -24,9 +33,10 @@ import {
 import type { Store, Tool } from './core/store';
 import { className, SCRIPT_TEMPLATES, SHADER_TEMPLATES } from './core/templates';
 import type {
-    AssetKind, AssetMeta, AssetSource, GeometryType, GrassDoc, LightType, MaterialOverride, MaterialSlotDoc, NodeDoc, ParamValue, PartOverride, PrefabDoc,
+    AnimeDoc, AnimeKind, AssetKind, AssetMeta, AssetSource, GeometryType, GrassDoc, LightType, MaterialOverride, MaterialSlotDoc, NodeDoc, ParamValue, PartOverride, PrefabDoc,
     ScatterDoc, SceneDoc, ScriptDoc, ShaderDoc, ShaderKind, TextureCompression, Vec3,
 } from './core/types';
+import { animeSetup } from './engine/animeSetup';
 import type { Picker } from './engine/picking';
 import type { RenderGraphController } from './engine/renderGraph';
 import type { Runtime } from './engine/runtime';
@@ -667,12 +677,16 @@ export class Editor extends Emitter<EditorEvents> {
                     continue;
                 }
                 const kind = kindOf(file);
-                if (kind === 'model') await this.importModel(file, at, files);
+                // A clip GLB dropped with a .pmx is a motion for it (retargeted in the conversion).
+                if (kind === 'model' && files.some((f) => /\.pmx$/i.test(f.name)) && (await isClipGlb(file))) continue;
+                // Any other motion file (no meshes) goes onto the selected models.
+                if (kind === 'model' && (await isClipGlb(file))) await this.importClip(file);
+                else if (kind === 'model') await this.importModel(file, at, files);
                 else if (kind === 'texture') {
-                    // The files a .gltf dropped with them names are part of it.
-                    if (!files.some((f) => f !== file && /\.gltf$/i.test(f.name))) await this.importTexture(file);
+                    // The files a .gltf or .pmx dropped with them names are part of it.
+                    if (!files.some((f) => f !== file && /\.(gltf|pmx)$/i.test(f.name))) await this.importTexture(file);
                 } else if (kind === 'audio') await this.importAudio(file);
-                else if (!files.some((f) => /\.gltf$/i.test(f.name))) toast(`Unsupported file: ${file.name}`, 'error');
+                else if (!files.some((f) => /\.(gltf|pmx)$/i.test(f.name))) toast(`Unsupported file: ${file.name}`, 'error');
             } catch (e: any) {
                 console.error(e);
                 toast(`Import failed: ${e?.message || e}`, 'error');
@@ -680,10 +694,80 @@ export class Editor extends Emitter<EditorEvents> {
         }
     }
 
+    /**
+     * A motion file (a GLB of a skeleton and clips, no meshes: Mixamo converted
+     * from FBX, VRoid, a game's clip) put on the selected models:
+     * retargeted onto each model's bones by their humanoid roles and written into a
+     * new copy of its file, which the objects showing it then use, playing the new
+     * clip. Other objects showing the old file keep it. One undo step takes it back.
+     */
+    async importClip(file: File, ids = this.store.selectionRoots()) {
+        const targets = ids.map((id) => this.store.node(id)).filter((n): n is NonNullable<typeof n> => !!n?.model);
+        if (!targets.length) {
+            toast(`${file.name} is a motion: select the model to put it on, then drop it again.`, 'info');
+            return;
+        }
+        const clipBytes = await file.arrayBuffer();
+        const stem = file.name.replace(/\.glb$/i, '');
+        const done: { from: string; meta: AssetMeta; clip: string; nodes: string[] }[] = [];
+        for (const asset of new Set(targets.map((n) => n.model!.asset))) {
+            const old = this.store.doc.assets.find((a) => a.id === asset);
+            const blob = await getAssetBlob(asset);
+            if (!blob || !old) {
+                toast('The model file is missing.', 'error');
+                continue;
+            }
+            const r = addClipsToModel(await blob.arrayBuffer(), clipBytes, stem);
+            for (const line of r.report) console.info(`${file.name} → ${old.name}: ${line}`);
+            const meta = await putAsset(new Blob([r.glb as Uint8Array<ArrayBuffer>], { type: 'model/gltf-binary' }), old.name, 'model');
+            done.push({ from: asset, meta, clip: r.names[0], nodes: targets.filter((n) => n.model!.asset === asset).map((n) => n.id) });
+        }
+        if (!done.length) return;
+        this.store.transact('Add Motion', () => {
+            this.store.update((doc) => {
+                for (const d of done) {
+                    doc.assets.push(d.meta);
+                    for (const id of d.nodes) {
+                        const node = doc.nodes.find((n) => n.id === id);
+                        if (!node?.model) continue;
+                        node.model.asset = d.meta.id;
+                        node.animation = AnimationSchema.parse({ ...(node.animation ?? {}), clip: d.clip });
+                    }
+                }
+            });
+        });
+        toast(`${file.name}: ${done[0].clip} added to ${targets.length === 1 ? targets[0].name : `${targets.length} objects`}.`, 'success');
+    }
+
     /** `with`: files imported with it, where a .gltf finds the files it names (they are packed into one GLB). */
     async importModel(file: File, at?: Vec3, with_: File[] = []) {
         let blob: Blob = file;
         let name = file.name;
+        if (name.toLowerCase().endsWith('.pmx')) {
+            // A MikuMikuDance model: made into a GLB with tangents and outline normals, its slots cel
+            // shaded and layered (eyes through hair, shadow cards), its terms of use kept as written.
+            const converted = await convertPmx(file, with_);
+            for (const line of converted.report) console.info(`${file.name}: ${line}`);
+            const meta = await putAsset(new Blob([converted.glb as Uint8Array<ArrayBuffer>], { type: 'model/gltf-binary' }), name.replace(/\.pmx$/i, '.glb'), 'model');
+            this.store.transact('Import Model', () => {
+                this.store.update((doc) => doc.assets.push(meta));
+                const id = this.addModel(meta.id, at, true);
+                this.store.update((doc) => {
+                    const node = doc.nodes.find((n) => n.id === id);
+                    if (!node?.model) return;
+                    node.model.materials ??= {};
+                    for (const s of converted.slots) {
+                        node.model.materials[s.material] = {
+                            shading: 'anime', alphaMode: s.alphaMode, opacity: s.opacity, doubleSide: s.doubleSide,
+                            ...(s.color ? { color: s.color } : {}), anime: { ...s.anime } as any, ...(s.pass ? { pass: { ...s.pass } } : {}),
+                        };
+                    }
+                    node.model.character = infoFromMeta({ name: converted.name, sourceTerms: converted.comment }, node.name);
+                });
+            });
+            toast(`Imported ${file.name} (${converted.report[0] ?? 'converted'}). Its license data is under Character File.`, 'success');
+            return;
+        }
         if (name.toLowerCase().endsWith('.gltf')) {
             const json = JSON.parse(await file.text());
             const missing = externalUris(json).filter((uri) => !fileNamed(with_, uri));
@@ -694,14 +778,154 @@ export class Editor extends Emitter<EditorEvents> {
             blob = await packGltf(json, (uri) => fileNamed(with_, uri)!.arrayBuffer());
             name = name.replace(/\.gltf$/i, '.glb');
         }
+        // A character file (format v1): its toon materials, motion and license data come along.
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let plan: ReturnType<typeof mglImportPlan> = null;
+        try {
+            plan = mglImportPlan(bytes, name.replace(/\.(glb|gltf|vrm)$/i, ''));
+        } catch {
+            plan = null;
+        }
+        const textures = new Map<number, string>();
+        const textureMetas: AssetMeta[] = [];
+        if (!plan && /\.vrm$/i.test(name)) {
+            // VRM 0.x keeps its data in another extension (and faces -Z): shown as a plain model.
+            let old = false;
+            try {
+                old = !!readMgl(bytes).json.extensions?.VRM;
+            } catch {
+                old = false;
+            }
+            if (old) toast(`${file.name} is VRM 0.x: its materials, springs and license data are not read (convert it to VRM 1.0). It faces away (-Z).`, 'info');
+        }
+        if (plan) {
+            const mgl = readMgl(bytes);
+            for (const index of plan.textures) {
+                const img = mglImage(mgl.json, mgl.bin, index);
+                if (!img) {
+                    // A texture of the shared library, named by its URI: the editor has it.
+                    const uri = mglImageUri(mgl.json, index);
+                    const lib = uri && libraryFile(uri) ? await this.libraryTexture(uri, false) : null;
+                    if (lib) {
+                        textures.set(index, lib.id);
+                        if (!this.store.doc.assets.some((a) => a.id === lib.id)) textureMetas.push(lib);
+                    } else plan.notes.push(`texture ${index} is not in the file${uri ? ` (${uri})` : ''}`);
+                    continue;
+                }
+                const ext = img.mimeType === 'image/jpeg' ? 'jpg' : img.mimeType === 'image/ktx2' ? 'ktx2' : 'png';
+                const tex = await putAsset(new Blob([img.bytes as Uint8Array<ArrayBuffer>], { type: img.mimeType }), `${img.name ?? `texture_${index}`}.${ext}`, 'texture');
+                textures.set(index, tex.id);
+                textureMetas.push(tex);
+            }
+            for (const line of plan.notes) console.info(`${file.name}: ${line}`);
+        }
         const meta = await putAsset(blob, name, 'model');
         // One undo step takes both back: the file and the object showing it.
         this.store.transact('Import Model', () => {
-            this.store.update((doc) => doc.assets.push(meta));
-            this.addModel(meta.id, at, true);
+            this.store.update((doc) => doc.assets.push(meta, ...textureMetas));
+            const id = this.addModel(meta.id, at, true);
+            if (!plan) return;
+            this.store.update((doc) => {
+                const node = doc.nodes.find((n) => n.id === id);
+                if (!node?.model) return;
+                node.model.materials ??= {};
+                for (const [key, s] of Object.entries(plan!.slots)) {
+                    node.model.materials[key] = {
+                        ...(node.model.materials[key] ?? {}),
+                        shading: 'anime',
+                        anime: mapAnimeMaps<number, string>(s.anime, (t) => textures.get(t) ?? null) as any,
+                        pass: s.pass,
+                        ...(s.alphaMode ? { alphaMode: s.alphaMode } : {}),
+                        ...(s.color ? { color: s.color } : {}),
+                        ...(s.opacity !== undefined ? { opacity: s.opacity } : {}),
+                        ...(s.normalScale !== undefined ? { normalScale: s.normalScale } : {}),
+                        ...(s.emissiveIntensity !== undefined ? { emissiveIntensity: s.emissiveIntensity } : {}),
+                    };
+                }
+                if (plan!.character) node.model.character = plan!.character;
+                const m = plan!.motion;
+                if (m && (m.springs.length || m.colliders.length || Object.keys(m.expressions).length)) {
+                    node.motion = Motion.parse({ ...(node.motion ?? {}), springs: m.springs, colliders: m.colliders, expressions: m.expressions, blink: m.blink });
+                }
+            });
         });
-        toast(`Imported ${file.name}`, 'success');
+        toast(plan ? `Imported the character ${file.name}: ${Object.keys(plan.slots).length} material(s)${plan.motion?.springs.length ? `, ${plan.motion.springs.length} spring group(s)` : ''}` : `Imported ${file.name}`, 'success');
         this.compressImported(meta.id);
+    }
+
+    /**
+     * A texture of the character format's shared library (a `library:` URI)
+     * as an asset of the scene: the one brought in before, or fetched from
+     * the editor's library/ and added now. `commit`: false leaves adding it
+     * to the caller's change (an import's).
+     */
+    async libraryTexture(uri: string, commit = true): Promise<AssetMeta | null> {
+        const have = this.store.doc.assets.find((a) => a.source?.url === uri);
+        if (have) return have;
+        const file = libraryFile(uri);
+        const res = file ? await fetch(libraryUrl(file)).catch(() => null) : null;
+        if (!file || !res?.ok) {
+            toast(`The shared library has no ${uri}.`, 'error');
+            return null;
+        }
+        const blob = await res.blob();
+        const meta = await putAsset(new Blob([blob], { type: 'image/png' }), `library-${file.replace(/\//g, '-')}`, 'texture', undefined, {
+            source: { url: uri, item: file.replace(/\.png$/, ''), license: LIBRARY_LICENSE, author: 'MGL shared library' },
+        });
+        if (commit) this.store.commit('Add Library Texture', (doc) => doc.assets.push(meta));
+        return meta;
+    }
+
+    /**
+     * Writes a model object as a character file (format v1): its toon slots,
+     * motion and license data in the file's extensions, checked as the format
+     * says. Returns the check's report (errors do not stop the file).
+     */
+    async exportCharacter(id: string, format: 'mgl' | 'vrm' = 'mgl'): Promise<{ errors: string[]; warnings: string[]; notes: string[] } | null> {
+        const node = this.store.node(id);
+        if (!node?.model) return null;
+        const blob = await getAssetBlob(node.model.asset);
+        if (!blob) {
+            toast('The model file is missing.', 'error');
+            return null;
+        }
+        const glb = new Uint8Array(await blob.arrayBuffer());
+        // The slots' own color textures and the maps of the cel-shaded slots, as images.
+        const images = new Map<string, MglImage>();
+        for (const o of Object.values(node.model.materials ?? {})) {
+            const ids = [o.map, ...(o.shading === 'anime' && o.anime ? ANIME_MAP_KEYS.map((key) => o.anime![key]) : [])];
+            for (const tid of ids) {
+                if (!tid || images.has(tid)) continue;
+                const tb = await getAssetBlob(tid);
+                if (!tb) continue;
+                const asset = this.store.doc.assets.find((a) => a.id === tid);
+                images.set(tid, { bytes: new Uint8Array(await tb.arrayBuffer()), mimeType: tb.type || asset?.mime || 'image/png', name: asset?.name.replace(/\.[^.]+$/, '') });
+            }
+        }
+        let written;
+        try {
+            const { input, notes } = mglExportInput({ glb, name: node.name, model: node.model, motion: node.motion, images });
+            const out = writeMgl(input);
+            written = { ...out, notes: [...notes, ...out.notes] };
+            if (format === 'vrm') {
+                // VRM 1.0 beside the format's data: one file VRM viewers and ours both read.
+                const file = readMgl(out.glb);
+                written.notes.push(...mglToVrm(file.json));
+                written.glb = joinGlb(file.json, file.bin);
+            }
+        } catch (e: any) {
+            toast(`Could not write the character file: ${e?.message ?? e}`, 'error');
+            return null;
+        }
+        const fileName = `${node.name}.${format === 'vrm' ? 'vrm' : 'glb'}`;
+        download(new Blob([written.glb as Uint8Array<ArrayBuffer>], { type: 'model/gltf-binary' }), fileName);
+        const { errors, warnings } = written.report;
+        for (const line of written.notes) console.info(`${node.name}: ${line}`);
+        for (const line of warnings) console.warn(`${node.name}: ${line}`);
+        for (const line of errors) console.error(`${node.name}: ${line}`);
+        if (errors.length) toast(`Wrote ${fileName}, but it breaks the format in ${errors.length} place(s): ${errors.slice(0, 2).join('; ')}${errors.length > 2 ? '…' : ''}`, 'error');
+        else toast(`Wrote ${fileName} (character format v1${format === 'vrm' ? ' with VRM 1.0' : ''}${warnings.length ? `, ${warnings.length} warning(s)` : ''}).`, 'success');
+        return { errors, warnings, notes: written.notes };
     }
 
     async importAudio(file: File) {
@@ -1567,6 +1791,37 @@ export class Editor extends Emitter<EditorEvents> {
                 delete n.model.parts;
             }
         }, { nodes: targets });
+    }
+
+    /**
+     * Sets imported models up as anime characters: every material slot gets
+     * cel shading of the kind its name says (engine/animeSetup.ts), with the
+     * head's center and front for faces, hair and eyes. A slot that already
+     * is one keeps what was set on it. Resolves with the kind of each slot of
+     * the first model, or null while none has loaded.
+     */
+    setupAnimeCharacter(ids: string[], label = 'Set Up Anime Character'): Record<string, AnimeKind> | null {
+        const setups = new Map<string, Record<string, AnimeDoc>>();
+        for (const id of ids) {
+            const info = this.store.node(id)?.model ? this.sync.modelInfo(id) : null;
+            if (info) setups.set(id, animeSetup(info));
+        }
+        if (!setups.size) return null;
+        this.store.commit(label, (d) => {
+            for (const n of d.nodes) {
+                const setup = setups.get(n.id);
+                if (!setup || !n.model) continue;
+                const materials = { ...(n.model.materials ?? {}) };
+                for (const [slot, anime] of Object.entries(setup)) {
+                    const cur = materials[slot] ?? {};
+                    const { shader: _shader, params: _params, ...rest } = cur;
+                    materials[slot] = { ...rest, shading: 'anime', anime: { ...anime, ...(cur.shading === 'anime' ? cur.anime : {}) } };
+                }
+                n.model.materials = materials;
+            }
+        }, { nodes: [...setups.keys()] });
+        const first = setups.values().next().value!;
+        return Object.fromEntries(Object.entries(first).map(([slot, a]) => [slot, a.kind]));
     }
 
     /** Copies a model node's overrides to every other instance of the same model. */

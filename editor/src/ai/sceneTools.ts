@@ -7,6 +7,8 @@ import { MATERIAL_PRESETS } from '../core/materialPresets';
 import { defaultCharacter, defaultPlayer } from '../core/character';
 import { Animation, ANIMATION_MODES, AudioSource, Body, Camera, Character, Environment, GEOMETRY_TYPES, Grass, Instancing, Light, Material, MaterialOverride, Mirror, Player, Rain, Terrain, Tree } from '../core/model';
 import { SPECIES_NAME } from '../core/trees';
+import { ANIME_MAP_KEYS, compactAnime } from '../core/anime';
+import { slotAnimeKind } from '../engine/animeSetup';
 import { layersOf, treeFrom, treeSummary } from './terrainTools';
 import { defaults, patch, snakeKeys, toolSchema } from '../core/schema';
 import type { GeometryType, LightType, MaterialDoc, NodeDoc, PartOverride, SceneDoc } from '../core/types';
@@ -319,7 +321,7 @@ export const sceneTools = tools({
     },
     set_model_material: {
         groups: ['materials'],
-        description: 'Override a material slot of imported model objects. Missing fields keep their value; reset clears the slot. Each slot can get its own shading: the file\'s PBR material, unlit, lambert, or a custom material shader.',
+        description: 'Override a material slot of imported model objects. Missing fields keep their value; reset clears the slot. Each slot can get its own shading: the file\'s PBR material, unlit, lambert, anime (cel shading with an outline: set anime.kind and the anime fields that should differ from the kind\'s; it keeps the file\'s color, normal, metallic-roughness and emission maps), or a custom material shader. For a whole character use setup_anime_character first.',
         params: {
             ids: { type: 'array', items: { type: 'string' } },
             slot: { type: 'string' },
@@ -340,7 +342,14 @@ export const sceneTools = tools({
                 return { data: { ok: true } };
             }
             const { ids: _ids, slot: _slot, reset: _reset, shading, alpha_mode: alphaMode, map, shader: shaderRef, params: values, ...fields } = args;
+            animeTextures(doc(), fields.anime);
             const change: Partial<MaterialOverride> = patch(MaterialOverride, {}, fields, 'material', hex);
+            // Cel shading settings add to those the slot has; a slot that turns anime starts as the kind its name says.
+            const before = doc().nodes.find((n) => n.id === ids[0])?.model?.materials?.[slot];
+            if (change.anime || (shading === 'anime' && !before?.anime)) {
+                const kind = change.anime?.kind ?? before?.anime?.kind ?? (info ? slotAnimeKind(info, slot) : 'cloth');
+                change.anime = compactAnime({ ...before?.anime, ...change.anime, kind });
+            }
             // "model", "auto" and "file" keep the file's own shading, alpha mode and texture.
             if (shading !== undefined) change.shading = shading === 'model' ? undefined : patch(MaterialOverride, {}, { shading }, 'material').shading;
             if (alphaMode !== undefined) change.alphaMode = alphaMode === 'auto' ? undefined : patch(MaterialOverride, {}, { alpha_mode: alphaMode }, 'material').alphaMode;
@@ -359,6 +368,18 @@ export const sceneTools = tools({
             }
             ed.setModelMaterial(ids, slot, change, 'AI: Model Material');
             return { data: { ok: true }, summary: slot };
+        },
+    },
+    setup_anime_character: {
+        groups: ['materials'],
+        description: 'Set imported character models up for cel shading in one step: every material slot gets shading "anime" with the kind its name says (face, hair, eye, skin, cloth), and faces, hair and eyes learn the head\'s center and front from the face\'s meshes. Returns the kind chosen for each slot: correct a wrong one with set_model_material (anime: { kind }), then tune colors and outlines there. Settings already made on an anime slot are kept.',
+        params: { ids: { type: 'array', items: { type: 'string' }, description: 'Model objects (ids or names).' } },
+        required: ['ids'],
+        run({ args, ed, doc }) {
+            const ids = modelIds(doc(), args.ids);
+            const kinds = ed.setupAnimeCharacter(ids, 'AI: Anime Character');
+            if (!kinds) return { data: { status: ed.sync.modelState(ids[0])?.status ?? 'loading', note: 'The model has not finished loading; try again shortly.' } };
+            return { data: { ok: true, slots: kinds, note: 'Kinds are guessed from the material names. A face without a face_map is shaded by rounded normals.' }, summary: `${Object.keys(kinds).length} slots` };
         },
     },
     set_model_part: {
@@ -497,10 +518,12 @@ function materialSummary(m: MaterialDoc): Json {
     const out: Json = { type: m.type, color: m.color };
     if (m.opacity < 1) out.opacity = r3(m.opacity);
     if (m.alphaMode && m.alphaMode !== 'auto') out.alpha_mode = m.alphaMode;
-    if (m.type === 'lit' || m.type === 'shader') {
+    if (m.type === 'lit' || m.type === 'shader' || m.type === 'anime') {
         out.metallic = r3(m.metallic);
         out.roughness = r3(m.roughness);
     }
+    // Cel shading: its kind and what was set on it (the rest is the kind's).
+    if (m.type === 'anime') out.anime = snakeKeys(m.anime ?? { kind: 'cloth' }) as Json;
     for (const [field, key] of [['normalMap', 'normal_map'], ['metalRoughMap', 'metal_rough_map'], ['aoMap', 'ao_map'], ['emissiveMap', 'emissive_map']] as const) {
         if (m[field]) out[key] = m[field];
     }
@@ -776,6 +799,18 @@ function textureId(doc: SceneDoc, v: unknown, what: string): string | null {
     return v;
 }
 
+/** The anime settings' texture fields as tools name them (ramp_map, shade_lut and so on). */
+const ANIME_TEXTURE_FIELDS = ANIME_MAP_KEYS.map((k) => k.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase()));
+
+/** The cel shading's own maps (anime.shade_map and so on) must be texture assets of the project. */
+function animeTextures(doc: SceneDoc, anime: unknown) {
+    if (!anime || typeof anime !== 'object') return;
+    for (const k of ANIME_TEXTURE_FIELDS) {
+        const v = (anime as Json)[k];
+        if (v !== undefined) textureId(doc, v, `anime.${k}`);
+    }
+}
+
 /** A primitive's material with the tool's changes: a preset first, the shader by id or name, textures that exist. */
 function applyMaterial(doc: SceneDoc, m: MaterialDoc, p: Json): MaterialDoc {
     const { preset, shader: shaderRef, ...fields } = p;
@@ -787,8 +822,11 @@ function applyMaterial(doc: SceneDoc, m: MaterialDoc, p: Json): MaterialDoc {
         found.apply(base);
     }
     for (const k of TEXTURE_FIELDS) if (fields[k] !== undefined) textureId(doc, fields[k], k);
+    animeTextures(doc, fields.anime);
     if (fields.params !== undefined) fields.params = params(fields.params);
     const out = patch(Material, base, fields, 'material', hex);
+    // Settings equal to the kind's are not stored, so a later change of kind brings its own.
+    if (out.anime) out.anime = compactAnime(out.anime);
     if (shaderRef === null) {
         out.type = 'lit';
         out.shader = null;

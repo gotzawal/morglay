@@ -1,4 +1,5 @@
-import { BlendMode, Engine3D, isSrgbFormat, LambertMaterial, LitMaterial, Material, Object3D, RenderNode, Texture, UnLitMaterial, Vector4 } from '@orillusion/core';
+import { BlendMode, Engine3D, isSrgbFormat, LambertMaterial, LitMaterial, Material, Object3D, PassType, RenderNode, Texture, UnLitMaterial, Vector4 } from '@orillusion/core';
+import type { SlotPassDoc, StencilTestDoc } from '../core/model';
 import { MAP_ROLES } from '../core/refs';
 import type { AlphaMode, MaterialDoc, TextureRole } from '../core/types';
 import { hexToColor } from './color';
@@ -65,6 +66,60 @@ export function applyAlpha(mat: Material, alpha: EngineAlpha, cutoff: number) {
     }
 }
 
+const NO_STENCIL: StencilTestDoc = { ref: 0, read: 255, write: 255, compare: 'always', pass: 'keep' };
+
+/**
+ * A slot's draw order, depth and stencil tests (MaterialOverride.pass), over
+ * what its alpha mode set. A second color pass (the anime outline) blends
+ * as the surface does and takes the outline's tests. Unset tests are the
+ * engine's defaults, so taking one away restores them.
+ */
+export function applySlotPass(mat: Material, p: SlotPassDoc | undefined, outline: boolean) {
+    // A material that never had one keeps the engine's state as it is.
+    const had = !!(mat as any).__slotPass;
+    if (!p && !had) return;
+    (mat as any).__slotPass = !!p;
+    const passes = (mat.shader.getSubShaders(PassType.COLOR) ?? []).slice(0, outline ? 2 : 1);
+    const surface = passes[0];
+    if (!surface) return;
+    if (p?.order !== undefined) {
+        surface.renderOrder = p.order;
+        // From 3000 on a renderer draws in the sorted list, after every opaque one, blended or not.
+        const sorted = p.order >= 3000;
+        if (surface.shaderState.transparent !== sorted) {
+            surface.shaderState.transparent = sorted;
+            (surface as any)._valueChange = true;
+        }
+    }
+    passes.forEach((pass, i) => {
+        const hull = i > 0;
+        if (hull) {
+            pass.blendMode = surface.blendMode;
+            pass.renderOrder = surface.renderOrder;
+            pass.shaderState.transparent = surface.shaderState.transparent;
+        } else {
+            if (p?.depthWrite !== undefined) pass.depthWriteEnabled = p.depthWrite;
+            pass.depthBias = Math.round(p?.depthBias ?? 0);
+            if (pass.shaderState.depthBiasSlopeScale !== (p?.depthBiasSlope ?? 0)) {
+                pass.shaderState.depthBiasSlopeScale = p?.depthBiasSlope ?? 0;
+                (pass as any)._valueChange = true;
+            }
+        }
+        pass.depthCompare = ((hull ? p?.outlineDepthCompare : p?.depthCompare) ?? 'less-equal') as any;
+        const s = (hull ? p?.outlineStencil : p?.stencil) ?? NO_STENCIL;
+        const face = { compare: s.compare, failOp: 'keep', depthFailOp: 'keep', passOp: s.pass } as GPUStencilFaceState;
+        const old = pass.stencilFront;
+        if (!old || old.compare !== face.compare || old.passOp !== face.passOp || old.failOp !== 'keep' || old.depthFailOp !== 'keep') {
+            pass.stencilFront = face;
+            pass.stencilBack = { ...face };
+        }
+        pass.stencilReadMask = s.read;
+        pass.stencilWriteMask = s.write;
+        pass.stencilRef = s.ref;
+    });
+    (mat as any)._notifyRenderClassificationDirty?.();
+}
+
 const PBR_UV_UNIFORMS = [
     'baseMapOffsetSize', 'normalMapOffsetSize', 'emissiveMapOffsetSize', 'roughnessMapOffsetSize', 'metallicMapOffsetSize', 'aoMapOffsetSize',
 ];
@@ -119,9 +174,21 @@ export interface MapSlot {
     role: TextureRole;
     /** Shader define that turns the map on, if it has one. */
     define?: string;
+    /** Shader define set while the texture's colors are still sRGB-encoded numbers (not decoded by the GPU), for shaders that decode them. */
+    encoded?: string;
 }
 
 export const BASE_MAP: MapSlot = { key: 'map', slot: 'baseMap', role: MAP_ROLES.map };
+
+/** Maps the anime material shares with the lit one (its own are engine/animeMaterial.ts ANIME_MAPS). */
+export const ANIME_PBR_MAPS: MapSlot[] = [
+    BASE_MAP,
+    { key: 'normalMap', slot: 'normalMap', role: MAP_ROLES.normalMap, define: 'ANIME_NORMALMAP' },
+    // The define tells a real map from the white stand-in (whose channels mean nothing in the toon layout).
+    { key: 'metalRoughMap', slot: 'maskMap', role: MAP_ROLES.metalRoughMap, define: 'ANIME_MASKMAP' },
+    { key: 'aoMap', slot: 'aoMap', role: MAP_ROLES.aoMap },
+    { key: 'emissiveMap', slot: 'emissiveMap', role: MAP_ROLES.emissiveMap, encoded: 'ANIME_EMISSIVE_ENCODED' },
+];
 
 /** Maps of the lit (PBR) material, base color first. */
 export const PBR_MAPS: MapSlot[] = [
@@ -190,7 +257,11 @@ export function normalizeModelMaterials(root: Object3D, ctx: any) {
 export class MaterialMaps {
     /** Texture asset currently requested per shader slot. */
     private assets = new Map<string, string | null>();
+    /** How the requested asset of each slot is read. */
+    private roles = new Map<string, TextureRole | null>();
     private defaults = new Map<string, Texture>();
+    /** The defines of each map as the material had them (a model's own maps are on), for when its own map is restored. */
+    private defaultDefines = new Map<string, boolean>();
     /** USE_SRGB_ALBEDO as the material had it, for when its own base map is restored. */
     private baseDefine: boolean;
 
@@ -203,24 +274,33 @@ export class MaterialMaps {
     }
 
     /** Shows the given asset (or the default when null) in a map slot. */
-    set(map: MapSlot, assetId: string | null) {
+    set(map: Pick<MapSlot, 'slot' | 'role' | 'define' | 'encoded'>, assetId: string | null) {
         const cur = this.assets.get(map.slot);
-        if (cur === assetId || (cur === undefined && assetId === null)) return;
+        // The same asset read another way (as data instead of colors) is another texture.
+        const role = assetId ? map.role : null;
+        const sameRole = (this.roles.get(map.slot) ?? null) === role;
+        if ((cur === assetId && sameRole) || (cur === undefined && assetId === null)) return;
+        this.roles.set(map.slot, role);
         const mat = this.mat;
-        if (!this.defaults.has(map.slot)) this.defaults.set(map.slot, defaultMapTexture(mat, map.slot, this.ctx));
+        if (!this.defaults.has(map.slot)) {
+            this.defaults.set(map.slot, defaultMapTexture(mat, map.slot, this.ctx));
+            const defines = mat.shader.getDefaultColorShader().defineValue ?? {};
+            for (const d of [map.define, map.encoded]) if (d) this.defaultDefines.set(d, !!defines[d]);
+        }
         this.assets.set(map.slot, assetId);
         if (!assetId) {
             mat.shader.setTexture(map.slot, this.defaults.get(map.slot)!);
-            if (map.define) mat.setDefine(map.define, false);
+            for (const d of [map.define, map.encoded]) if (d) mat.setDefine(d, this.defaultDefines.get(d) ?? false);
             if (map.slot === 'baseMap') mat.setDefine('USE_SRGB_ALBEDO', this.baseDefine);
             return;
         }
         void this.load(assetId, map.role).then((tex) => {
-            if (!tex || this.assets.get(map.slot) !== assetId) return;
+            if (!tex || this.assets.get(map.slot) !== assetId || this.roles.get(map.slot) !== map.role) return;
             // A texture decoded from sRGB by the GPU skips the shader's own decode.
             if (map.slot === 'baseMap') mat.setDefine('USE_SRGB_ALBEDO', isSrgbFormat(tex.format));
             mat.shader.setTexture(map.slot, tex);
             if (map.define) mat.setDefine(map.define, true);
+            if (map.encoded) mat.setDefine(map.encoded, !isSrgbFormat(tex.format));
         });
     }
 }

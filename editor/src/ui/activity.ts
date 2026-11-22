@@ -12,6 +12,7 @@ const ACTIVITY: Record<string, string> = {
     set_environment: 'Setting the sky and the light',
     list_model_parts: 'Looking at a model',
     set_model_material: 'Changing a model\'s materials',
+    setup_anime_character: 'Setting up an anime character',
     set_model_part: 'Changing a model',
     add_model: 'Placing a model',
     search_library: 'Searching the library',
