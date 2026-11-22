@@ -25,12 +25,17 @@ export let ZPassShader_vs: string = /*wgsl*/ `
 
     var<private> worldMatrix: mat4x4<f32>;
 
+    // A mesh may have morph targets and a skin (a face): the skin's
+    // bindings then come after the morph targets' three.
     #if USE_MORPHTARGETS
         ${MorphTarget_shader.getMorphTargetShaderBinding(1, 0)}
-    #endif
-
-    #if USE_SKELETON
-        ${SkeletonAnimation_shader.groupBindingAndFunctions(1, 0)}
+        #if USE_SKELETON
+            ${SkeletonAnimation_shader.groupBindingAndFunctions(1, 3)}
+        #endif
+    #else
+        #if USE_SKELETON
+            ${SkeletonAnimation_shader.groupBindingAndFunctions(1, 0)}
+        #endif
     #endif
 
     // Instanced draws (InstanceDrawComponent) read each instance's matrix

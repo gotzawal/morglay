@@ -72,13 +72,34 @@ export class GLTFSubParser {
         assertSupportedGltfExtensions(this.gltf);
         if (EXT_meshopt_compression.isUsed(this.gltf)) await EXT_meshopt_compression.ready();
 
+        const nodes = await this.parseScene(sceneId);
+        this.adoptUnusedSkins();
         const result = {
-            nodes: await this.parseScene(sceneId),
+            nodes,
             animations: this.parseAnimations(),
             name: this.currentSceneName,
         };
 
         return await this.convertToNode(result);
+    }
+
+    /**
+     * A skin no mesh uses is still a skeleton: a rig handed over on its own,
+     * or a file that only carries clips for one. Its root node gets the
+     * animator like any other skeleton's, so the file's clips play on the
+     * bones (a mesh would otherwise be the only thing that asks for one).
+     */
+    private adoptUnusedSkins() {
+        const skins = this.gltf.skins;
+        if (!skins) return;
+        for (let i = 0; i < skins.length; i++) {
+            if (skins[i].isParsed) continue;
+            const skin = this.parseSkin(i);
+            const root = skin ? this.gltf.nodes[skin.skeleton] : null;
+            // Not part of the scene being loaded: nothing to animate.
+            if (!root || !root.dnode) continue;
+            if (!root.dnode['skeleton']) root.dnode['skeleton'] = skin;
+        }
     }
 
     public destroy() {
@@ -249,9 +270,9 @@ export class GLTFSubParser {
             return preloaded;
         }
         if (image.bufferView !== undefined) {
-            // Preloaded by GLBParser (linear), else decoded here for this color space.
+            // Preloaded by GLBParser in the color space its materials read it in, else decoded here for this one.
             const key = `image_${imageIndex}:${colorSpace}`;
-            let bitmapTexture: BitmapTexture2D = this.gltf.resources['image_' + imageIndex] ?? this.gltf.resources[key];
+            let bitmapTexture: BitmapTexture2D = this.gltf.resources[key];
             if (!bitmapTexture) {
                 let buffer = this.parseBufferView(image.bufferView);
                 bitmapTexture = new BitmapTexture2D(true, this.ctx, colorSpace);

@@ -30,7 +30,12 @@ export let TonemapShader: string = /*wgsl*/ `
         let raw = textureSample(baseMap, baseMapSampler, uv);
 
         var rgb = raw.rgb * materialUniform.exposure;
-        if (materialUniform.mode > 0.5) {
+        if (materialUniform.mode > 1.5) {
+            // Display: the scene holds display (sRGB-encoded) colors. Decoded
+            // here, the swapchain's sRGB view encodes them back as they were.
+            let c = max(rgb, vec3<f32>(0.0));
+            rgb = select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+        } else if (materialUniform.mode > 0.5) {
             rgb = ACESToneMapping(rgb, 1.0);
         }
         return FragmentOutput(vec4<f32>(rgb, raw.a));

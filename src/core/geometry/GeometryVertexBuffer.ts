@@ -26,6 +26,18 @@ export class GeometryVertexBuffer {
      * renderer draws the new one. The owner resets it after handling.
      */
     public bufferChanged: boolean = false;
+    /**
+     * Names how the vertices of a `compose` buffer are packed (which
+     * attributes, in which order, hence the stride and every offset): the
+     * same number for every buffer packed the same way, 0 before the first
+     * build and for the other layout types. A pipeline is built for one
+     * packing, so a pass draws a geometry with the pipeline of the
+     * geometry's packing id (RenderShaderPass.apply): a pass that adds an
+     * attribute to a shared buffer grows the stride under every pipeline
+     * built before it.
+     */
+    public packingId: number = 0;
+    private static _packings = new Map<string, number>();
     private _vertexBufferLayouts: VertexBufferLayout[];
     private _attributeSlotLayouts: VertexAttribute[][];
     private _attributeLocation: { [attribute: string]: number };
@@ -303,6 +315,15 @@ export class GeometryVertexBuffer {
             offset: 0,
             size: this.vertexCount * this._composeStride * 4
         }
+
+        // The packing by its attributes in order: equal packings share an id.
+        const packing = this._composeCanonical.map((c) => `${c.name}:${c.format}`).join('|');
+        let id = GeometryVertexBuffer._packings.get(packing);
+        if (id === undefined) {
+            id = GeometryVertexBuffer._packings.size + 1;
+            GeometryVertexBuffer._packings.set(packing, id);
+        }
+        this.packingId = id;
 
         this.allocVertexBuffer(this.vertexCount * this._composeStride);
     }

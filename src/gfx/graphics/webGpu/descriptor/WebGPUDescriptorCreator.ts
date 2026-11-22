@@ -54,8 +54,11 @@ export class WebGPUDescriptorCreator {
             rps.renderTargets = rtFrame.renderTargets;
             rps.rtTextureDescriptors = rtFrame.rtDescriptors;
             rps.renderPassDescriptor = WebGPUDescriptorCreator.getRenderPassDescriptor(ctx, rps);
-            if (rps.renderPassDescriptor.depthStencilAttachment) {
-                rps.renderPassDescriptor.depthStencilAttachment.depthLoadOp = rtFrame.depthLoadOp;
+            const ds = rps.renderPassDescriptor.depthStencilAttachment;
+            if (ds) {
+                ds.depthLoadOp = rtFrame.depthLoadOp;
+                // The stencil goes on (or starts over) with the depth.
+                if (ds.stencilLoadOp) ds.stencilLoadOp = ds.depthLoadOp;
             }
             rps.depthLoadOp = rtFrame.depthLoadOp;
             rps.renderBundleEncoderDescriptor = WebGPUDescriptorCreator.getRenderBundleDescriptor(ctx, rps);
@@ -173,8 +176,10 @@ export class WebGPUDescriptorCreator {
             // stencilLoadOp + stencilStoreOp on every BeginRenderPass —
             // omitting them triggers a Dawn validation error and the
             // whole command buffer is rejected. Mirror the depth
-            // load/store choice: `load` when chaining a prepass, `clear`
-            // (to 0) otherwise.
+            // load/store choice: a pass that goes on with the depth
+            // already there (a prepass, or a continuation sub-pass such as
+            // the transparent one) keeps the stencil written with it too;
+            // a pass that clears the depth clears the stencil (to 0).
             const hasStencil = typeof renderPassState.depthTexture.format === 'string'
                 && (renderPassState.depthTexture.format as string).includes('stencil');
             const dsAttach: GPURenderPassDepthStencilAttachment = {
@@ -184,7 +189,7 @@ export class WebGPUDescriptorCreator {
                 depthStoreOp: "store",
             };
             if (hasStencil) {
-                dsAttach.stencilLoadOp = renderPassState.zPreTexture ? 'load' : 'clear';
+                dsAttach.stencilLoadOp = dsAttach.depthLoadOp;
                 dsAttach.stencilClearValue = 0;
                 dsAttach.stencilStoreOp = 'store';
             }

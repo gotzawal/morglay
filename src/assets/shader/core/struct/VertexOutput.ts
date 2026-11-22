@@ -28,6 +28,14 @@ export let VertexOutput: string = /*wgsl*/ `
         @location(auto) varying_ModelScale: vec3<f32>,
     #endif
 
+    #if USE_CUSTOM_VARYING
+        // Three free vec4s a material's vert() may fill for its frag()
+        // (FragmentVarying.vCustom0..2), e.g. a frame of reference it works
+        // out per vertex from the skinned world matrix.
+        @location(auto) varying_Custom0: vec4<f32>,
+        @location(auto) varying_Custom1: vec4<f32>,
+        @location(auto) varying_Custom2: vec4<f32>,
+    #endif
 
     @builtin(position) member: vec4<f32>
     };

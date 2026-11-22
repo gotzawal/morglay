@@ -115,6 +115,18 @@ export class GLTFSubParserMesh {
                         //   vertexColor = accessor.numComponents;
                         //   break;
 
+                        // The hull normal of an outlined mesh (an application
+                        // attribute: glTF leaves those to whoever reads them).
+                        // `_OUTLINE` (character format v1) carries a fourth
+                        // number, reserved (1); `_OUTLINE_NORMAL` has none.
+                        case '_OUTLINE':
+                            attribName = VertexAttributeName.outlineNormal;
+                            break;
+                        case '_OUTLINE_NORMAL':
+                            attribName = VertexAttributeName.outlineNormal;
+                            accessor.outlineWithoutWidth = true;
+                            break;
+
                         default:
                             attribName = attribute;
                     }

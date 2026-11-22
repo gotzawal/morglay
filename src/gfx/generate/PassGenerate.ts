@@ -82,11 +82,15 @@ export class PassGenerate {
         let colorPassList = shader.getSubShaders(PassType.COLOR);
         for (let i = 0; i < colorPassList.length; i++) {
             const colorPass = colorPassList[i];
+            // A further color pass that casts no shadow of its own (an
+            // outline hull drawn after the surface) gets no shadow passes:
+            // the first pass's already cast the mesh.
+            if (i > 0 && !colorPass.shaderState.castShadow) continue;
             let shadowPassList = shader.getSubShaders(PassType.SHADOW);
             if (!shadowPassList || shadowPassList.length < (i + 1)) {
                 let shadowPass = new CastShadowMaterialPass();
                 // shadowPass.doubleSide = colorPass.doubleSide;
-                shadowPass.cullMode = colorPass.cullMode;
+                shadowPass.cullMode = colorPass.shaderState.shadowCullMode ?? colorPass.cullMode;
                 shadowPass.setTexture(`baseMap`, colorPass.getTexture(`baseMap`));
                 if (colorPass.uniforms[`alphaCutoff`]) shadowPass.setUniform(`alphaCutoff`, colorPass.getUniform(`alphaCutoff`));
                 shadowPass.setDefine(`USE_ALPHACUT`, CastShadowMaterialPass.cutsAlpha(colorPass));
@@ -145,7 +149,7 @@ export class PassGenerate {
                     // geometry casts too. The shadow atlas draws its faces
                     // with plain cameras (no mirroring), so this is the color
                     // pass's own culling.
-                    castPointShadowPass.shaderState.cullMode = colorPass.cullMode;
+                    castPointShadowPass.shaderState.cullMode = colorPass.shaderState.shadowCullMode ?? colorPass.cullMode;
                     const ctxB = this._ctxOf(renderNode);
                     if (ctxB) bindCtx(castPointShadowPass, ctxB);
                     castPointShadowPass.preCompile(renderNode.geometry);

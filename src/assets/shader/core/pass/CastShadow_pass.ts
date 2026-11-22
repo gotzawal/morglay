@@ -14,12 +14,17 @@ struct VertexOutput {
     @builtin(position) member: vec4<f32>
 };
 
+// A mesh may have morph targets and a skin (a face): the skin's bindings
+// then come after the morph targets' three.
 #if USE_MORPHTARGETS
     ${MorphTarget_shader.getMorphTargetShaderBinding(2, 1)}
-#endif
-
-#if USE_SKELETON
-    ${SkeletonAnimation_shader.groupBindingAndFunctions(2, 1)}
+    #if USE_SKELETON
+        ${SkeletonAnimation_shader.groupBindingAndFunctions(2, 4)}
+    #endif
+#else
+    #if USE_SKELETON
+        ${SkeletonAnimation_shader.groupBindingAndFunctions(2, 1)}
+    #endif
 #endif
 
 // Instanced draws (InstanceDrawComponent) read each instance's matrix index.
@@ -82,12 +87,17 @@ struct VertexOutput {
     @builtin(position) member: vec4<f32>
 };
 
+// A mesh may have morph targets and a skin (a face): the skin's bindings
+// then come after the morph targets' three.
 #if USE_MORPHTARGETS
     ${MorphTarget_shader.getMorphTargetShaderBinding(2, 1)}
-#endif
-
-#if USE_SKELETON
-    ${SkeletonAnimation_shader.groupBindingAndFunctions(2, 1)}
+    #if USE_SKELETON
+        ${SkeletonAnimation_shader.groupBindingAndFunctions(2, 4)}
+    #endif
+#else
+    #if USE_SKELETON
+        ${SkeletonAnimation_shader.groupBindingAndFunctions(2, 1)}
+    #endif
 #endif
 
 // Instanced draws (InstanceDrawComponent) read each instance's matrix index.

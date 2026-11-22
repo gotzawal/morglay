@@ -26,6 +26,13 @@ export let FragmentVarying: string = /*wgsl*/ `
             @location(auto) modelScale: vec3<f32>,
         #endif
 
+        #if USE_CUSTOM_VARYING
+            // Matches VertexOutput.varying_Custom0..2.
+            @location(auto) vCustom0: vec4<f32>,
+            @location(auto) vCustom1: vec4<f32>,
+            @location(auto) vCustom2: vec4<f32>,
+        #endif
+
         @builtin(front_facing) face: bool,
         @builtin(position) fragCoord : vec4<f32>
     };

@@ -68,7 +68,7 @@ export class TonemapPost extends PostBase {
         if (!this.postQuad) return;
         const tm = this.setting.render.tonemap;
         const exposure = tm ? tm.exposure : 1.0;
-        const mode = tm && tm.mode === 'None' ? 0.0 : 1.0;
+        const mode = tm && tm.mode === 'None' ? 0.0 : tm && tm.mode === 'Display' ? 2.0 : 1.0;
         this.postQuad.quadShader.setUniform('exposure', exposure);
         this.postQuad.quadShader.setUniform('mode', mode);
     }
