@@ -401,23 +401,46 @@ export class Runtime {
     private fitShadowLights() {
         const tier = QUALITY[this.qualityLevel];
         const seen = new Set<LightBase>();
-        for (const l of EntityCollect.instance.getLights(this.scene)) {
-            if (!(l instanceof LightBase)) continue;
+        const fit = (l: LightBase) => {
             seen.add(l);
-            if (l.castShadow) fitLightShadow(l, tier);
+            if (!l.castShadow) return;
+            try {
+                fitLightShadow(l, tier);
+            } catch (e) {
+                // The engine draws no further frame after one that throws: a light
+                // that cannot be fitted is reported once and left as it is.
+                if (!this.unfitLights.has(l)) console.error('[editor] could not fit a light\'s shadow', e);
+                this.unfitLights.add(l);
+            }
+        };
+        for (const l of EntityCollect.instance.getLights(this.scene)) {
+            if (l instanceof LightBase && !l.isDestroyed) fit(l);
         }
-        // The scene's own lights, whether or not the engine's list holds them.
+        // The scene's own lights, whether or not the engine's list holds them. A
+        // destroyed light goes (a directional one has no shadow camera left), and
+        // so does one taken out of the scene: its transform still names the scene
+        // it was in, so the scene is looked for up its parents.
         for (const l of this.sceneLights) {
-            if (!l.object3D?.transform?.scene3D) {
+            if (l.isDestroyed || !this.inScene(l.object3D)) {
                 this.sceneLights.delete(l);
                 continue;
             }
-            if (!seen.has(l) && l.castShadow) fitLightShadow(l, tier);
+            if (!seen.has(l)) fit(l);
         }
+    }
+
+    /** Whether an object is under the scene now. */
+    private inScene(obj: Object3D | null | undefined): boolean {
+        for (let t = obj?.transform; t; t = t.parent) {
+            if (t.object3D === this.scene) return true;
+        }
+        return false;
     }
 
     /** The lights the scene document made (SceneSync): their shadow settings are fitted every frame. */
     private sceneLights = new Set<LightBase>();
+    /** Lights whose shadow could not be fitted, reported once. */
+    private unfitLights = new WeakSet<LightBase>();
 
     trackLight(l: LightBase) {
         this.sceneLights.add(l);
