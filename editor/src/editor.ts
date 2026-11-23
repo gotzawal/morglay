@@ -2019,7 +2019,7 @@ export class Editor extends Emitter<EditorEvents> {
         return empty || confirmDialog(title, `${what} It is only kept in this browser unless you saved a file.`, ok, true);
     }
 
-    async newScene(kind: 'empty' | 'laundromat' | 'island' = 'empty') {
+    async newScene(kind: 'empty' | 'laundromat' | 'island' | 'edelweiss' = 'empty') {
         if (!(await this.confirmReplace('New scene', 'Discard'))) return;
         if (kind === 'island') {
             // Built with the editor's commands: its heightmap is made and the Library's files fetched.
@@ -2031,11 +2031,12 @@ export class Editor extends Emitter<EditorEvents> {
             }
             return;
         }
-        if (kind === 'laundromat') {
+        if (kind === 'laundromat' || kind === 'edelweiss') {
             // A finished project, with its files: loaded from editor/examples (examples/ next to the editor).
-            toast('Opening Night Laundromat...', 'info', 2000);
+            const [folder, title] = kind === 'laundromat' ? ['night-laundromat', 'Night Laundromat'] : ['edelweiss-walk', 'Edelweiss Walk'];
+            toast(`Opening ${title}...`, 'info', 2000);
             try {
-                const { doc, camera } = await importProjectFolder(new URL('examples/night-laundromat/', document.baseURI).href);
+                const { doc, camera } = await importProjectFolder(new URL(`examples/${folder}/`, document.baseURI).href);
                 this.loadDoc(doc, camera ?? defaultCamera());
             } catch (e: any) {
                 toast(`The example could not be opened: ${e?.message || e}`, 'error');
