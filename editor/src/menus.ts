@@ -98,6 +98,7 @@ export function menuDefinitions(
                 { label: 'New Empty Scene', icon: 'plus', action: () => void editor.newScene('empty') },
                 { label: 'Open Example: Night Laundromat', action: () => void editor.newScene('laundromat') },
                 { label: 'Open Example: Island', action: () => void editor.newScene('island') },
+                { label: 'Open Example: Edelweiss Walk', action: () => void editor.newScene('edelweiss') },
                 { separator: true },
                 cmd('file.open'),
                 { label: 'Open Link...', icon: 'link', action: () => void openFromLink(editor) },
