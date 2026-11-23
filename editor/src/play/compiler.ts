@@ -1,7 +1,9 @@
 import * as core from '@orillusion/core';
 import { Emitter } from '../core/events';
+import { getAssetBlob, putAsset } from '../core/assets';
+import { makeNode } from '../core/defaults';
 import type { Store } from '../core/store';
-import type { ParamValue, ScriptDoc } from '../core/types';
+import type { AssetKind, NodeDoc, ParamValue, SceneDoc, ScriptDoc } from '../core/types';
 import { Script, LIFECYCLE, withContext } from './script';
 
 // Scripts are ES module-like JavaScript. The compiler turns `import` /
@@ -17,6 +19,28 @@ export interface ScriptDiagnostic {
     line: number;
     column: number;
     message: string;
+}
+
+/**
+ * What a script gets as `project` (import { project } from 'morglay'): the project's own document and files, for scripts that
+ * make or change things in it. A script's top-level code runs as soon as it is compiled, when the project opens (an example's
+ * scripts are trusted; a scene file's wait for Enable Scripts), not only in Play: with `onChange` it can follow the project.
+ */
+export interface ProjectApi {
+    /** This script's id and name. */
+    readonly script: { id: string; name: string };
+    /** The project's document as it is now: read it, and change it with `commit`. */
+    readonly doc: SceneDoc;
+    /** One undo step: `change` edits the document. */
+    commit(label: string, change: (doc: SceneDoc) => void): void;
+    /** The bytes of an asset (a model, a texture, a data file), or null. */
+    readAsset(id: string): Promise<ArrayBuffer | null>;
+    /** Stores bytes as a new asset of the project, listed in it; returns its id. */
+    addAsset(name: string, data: Uint8Array, kind: AssetKind, mime?: string): Promise<string>;
+    /** A new object, not yet in the project: push it into `doc.nodes` in a commit. */
+    newNode(name: string, position?: [number, number, number]): NodeDoc;
+    /** Calls `listener` whenever the project changes or is loaded, until the script is compiled again or removed; returns a function that stops it. */
+    onChange(listener: () => void): () => void;
 }
 
 export type FieldType = 'number' | 'boolean' | 'string' | 'color' | 'vec3';
@@ -179,6 +203,8 @@ function fieldType(v: unknown): FieldType | null {
 export class ScriptCompiler extends Emitter<CompilerEvents> {
     private cache = new Map<string, CompiledScript>();
     private _trusted: boolean;
+    /** What each script registered with project.onChange: stopped when it is compiled again or removed. */
+    private stops = new Map<string, (() => void)[]>();
 
     constructor(private store: Store, trusted = true) {
         super();
@@ -209,7 +235,45 @@ export class ScriptCompiler extends Emitter<CompilerEvents> {
             alive.add(doc.id);
             this.get(doc.id);
         }
-        for (const id of Array.from(this.cache.keys())) if (!alive.has(id)) this.cache.delete(id);
+        for (const id of Array.from(this.cache.keys())) {
+            if (alive.has(id)) continue;
+            this.cache.delete(id);
+            this.stopListening(id);
+        }
+    }
+
+    private stopListening(id: string) {
+        for (const stop of this.stops.get(id) ?? []) stop();
+        this.stops.delete(id);
+    }
+
+    /** The `project` object of one script. */
+    private projectFor(doc: ScriptDoc): ProjectApi {
+        const store = this.store;
+        const listen = (off: () => void) => {
+            const list = this.stops.get(doc.id) ?? [];
+            list.push(off);
+            this.stops.set(doc.id, list);
+            return off;
+        };
+        return {
+            script: { id: doc.id, name: doc.name },
+            get doc() {
+                return store.doc;
+            },
+            commit: (label, change) => store.commit(label, change),
+            readAsset: async (id) => (await getAssetBlob(id))?.arrayBuffer() ?? null,
+            addAsset: async (name, data, kind, mime) => {
+                const meta = await putAsset(new Blob([data as Uint8Array<ArrayBuffer>], { type: mime ?? '' }), name, kind);
+                store.commit(`Add ${name}`, (d) => void d.assets.push(meta));
+                return meta.id;
+            },
+            newNode: (name, position) => makeNode(name, null, position),
+            onChange: (listener) => {
+                const offs = [store.on('change', () => listener()), store.on('load', () => listener())];
+                return listen(() => offs.forEach((off) => off()));
+            },
+        };
     }
 
     /** The compiled form of a script, compiling it first when the source changed. */
@@ -242,6 +306,7 @@ export class ScriptCompiler extends Emitter<CompilerEvents> {
             result.error = { line: 0, column: 0, message: PAUSED_MESSAGE };
             return result;
         }
+        this.stopListening(doc.id);
         const t = transformModule(doc.code);
         if (t.error) {
             result.error = t.error;
@@ -259,7 +324,8 @@ export class ScriptCompiler extends Emitter<CompilerEvents> {
         }
         let cls: any;
         try {
-            cls = factory((mod: string) => MODULES[mod]?.(), Script, {});
+            const project = this.projectFor(doc);
+            cls = factory((mod: string) => (mod === 'morglay' || mod === '@morglay/script' ? { ...MODULES[mod](), project } : MODULES[mod]?.()), Script, {});
         } catch (e: any) {
             const loc = scriptLocation(e);
             result.error = { line: loc?.line ?? 0, column: loc?.column ?? 0, message: `${e?.name || 'Error'}: ${e?.message || e}` };
