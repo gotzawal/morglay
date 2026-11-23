@@ -1200,15 +1200,17 @@ export function walkAlong(
     const at = (list: number[], t: number) => { const u = clamp(t / dt, 0, n), k = Math.min(n - 1, Math.floor(u)); return list[k] + (list[k + 1] - list[k]) * (u - k); };
     // The way by distance: where along it, and which way it goes (from the stretches that move; straight on past its ends).
     const knots: { s: number; at: V3; heading: number }[] = [];
-    let last = 0;
+    let last = 0, anchor = 0;
     for (let k = 1; k <= n; k++) {
-        const d = sub(P[k], P[k - 1]);
-        if (length(d) < 1e-7) continue;
+        // (A knot every 5 mm of the way at least: over less, the points' own rounding turns the way about.)
+        const d = sub(P[k], P[anchor]);
+        if (length(d) < 0.005) continue;
         let heading = Math.atan2(dot(d, left), dot(d, fwd));
         if (knots.length) heading = last + Math.atan2(Math.sin(heading - last), Math.cos(heading - last));
-        if (!knots.length) knots.push({ s: S[k - 1], at: P[k - 1], heading });
+        if (!knots.length) knots.push({ s: S[anchor], at: P[anchor], heading });
         knots.push({ s: S[k], at: P[k], heading });
         last = heading;
+        anchor = k;
     }
     if (!knots.length) knots.push({ s: 0, at: P[0], heading: 0 }, { s: 1e-6, at: P[0], heading: 0 });
     // (Counted from the way the body stands at first, whole turns off, so that it turns to its way the short way round.)

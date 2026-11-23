@@ -23,6 +23,7 @@ import { Emitter } from './core/events';
 import { ask, confirmDialog, toast } from './core/messages';
 import { Animation as AnimationSchema, AudioSource, Grass, Mirror, Motion, Rain, Scatter, ScatterSource } from './core/model';
 import { addClipsToModel } from './core/clipImport';
+import { trailRibbon, walkOnModel, type Trail } from './core/motionGen/pathWalk';
 import { SPECIES_NAME, TREE_SPECIES, TREE_VARIANTS, variantIndex, variantSeed, type TreeSpecies } from './core/trees';
 import { defaults } from './core/schema';
 import { DEG, add, compose, decompose, eulerFromQuat, invert, len, mat4, mul, sub, tidy3, transformDir, transformPoint } from './core/math';
@@ -737,6 +738,56 @@ export class Editor extends Emitter<EditorEvents> {
             });
         });
         toast(`${file.name}: ${done[0].clip} added to ${targets.length === 1 ? targets[0].name : `${targets.length} objects`}.`, 'success');
+    }
+
+    /**
+     * A walk made on a model object from a trail (a JSON file of where its capsule goes over time: core/motionGen/pathWalk.ts):
+     * the motion formulas walk the trail on the model's own body, and the clip is written into a new copy of the model's file,
+     * which the object then uses, playing it. The file it replaces goes where nothing else shows it.
+     */
+    async makePathWalk(id: string, trailAsset: string, clip = 'Walk Path') {
+        const node = this.store.node(id);
+        const old = node?.model ? this.store.doc.assets.find((a) => a.id === node.model!.asset) : undefined;
+        const blob = old ? await getAssetBlob(old.id) : null;
+        const trailBlob = await getAssetBlob(trailAsset);
+        if (!node || !old || !blob || !trailBlob) {
+            toast('The model or its trail is missing.', 'error');
+            return;
+        }
+        try {
+            const made = walkOnModel(await blob.arrayBuffer(), JSON.parse(await trailBlob.text()) as Trail, clip);
+            const meta = await putAsset(new Blob([made.glb as Uint8Array<ArrayBuffer>], { type: 'model/gltf-binary' }), old.name, 'model');
+            this.store.transact('Make Walk', () => {
+                this.store.update((doc) => {
+                    doc.assets.push(meta);
+                    const shown = doc.nodes.find((n) => n.id === id);
+                    if (!shown?.model) return;
+                    shown.model.asset = meta.id;
+                    shown.animation = AnimationSchema.parse({ ...(shown.animation ?? {}), clip: made.name });
+                    // The file without the walk, where no other object shows it.
+                    if (!doc.nodes.some((n) => n.model?.asset === old.id)) doc.assets = doc.assets.filter((a) => a.id !== old.id);
+                });
+            });
+            toast(`Made a walk of ${made.seconds.toFixed(0)} s for ${node.name}.`, 'success');
+        } catch (e: any) {
+            console.error(e);
+            toast(`Could not make the walk: ${e?.message || e}`, 'error');
+        }
+    }
+
+    /** The trail of a trail file drawn on the floor (a ribbon, core/motionGen/pathWalk.ts), as an object called Walk Path. */
+    async drawTrail(trailAsset: string, name = 'Walk Path') {
+        const blob = await getAssetBlob(trailAsset);
+        if (!blob) return;
+        const glb = trailRibbon(JSON.parse(await blob.text()) as Trail);
+        const meta = await putAsset(new Blob([glb as Uint8Array<ArrayBuffer>], { type: 'model/gltf-binary' }), 'walk-path.glb', 'model');
+        const node = makeNode(name, null, [0, 0, 0]);
+        node.model = { asset: meta.id };
+        this.store.transact('Draw Path', () => {
+            this.store.update((doc) => doc.assets.push(meta));
+            this.insert([node], 'Draw Path');
+        });
+        this.store.select([]);
     }
 
     /** `with`: files imported with it, where a .gltf finds the files it names (they are packed into one GLB). */
@@ -2038,6 +2089,17 @@ export class Editor extends Emitter<EditorEvents> {
             try {
                 const { doc, camera } = await importProjectFolder(new URL(`examples/${folder}/`, document.baseURI).href);
                 this.loadDoc(doc, camera ?? defaultCamera());
+                // Her walk is not in the project: it is made now, on her own body, from the trail the project holds.
+                if (kind === 'edelweiss') {
+                    toast('Making her walk...', 'info', 4000);
+                    await new Promise((r) => setTimeout(r, 60));
+                    const her = this.store.doc.nodes.find((n) => n.name === 'Edelweiss' && n.model);
+                    const trail = this.store.doc.assets.find((a) => a.name === 'walk-trail.json');
+                    if (her && trail) {
+                        await this.makePathWalk(her.id, trail.id);
+                        await this.drawTrail(trail.id);
+                    }
+                }
             } catch (e: any) {
                 toast(`The example could not be opened: ${e?.message || e}`, 'error');
             }
