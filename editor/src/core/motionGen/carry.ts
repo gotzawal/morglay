@@ -79,6 +79,8 @@ export interface CarryPlan {
     loop?: boolean;
     /** The walk that is carried. */
     gait: Gait;
+    /** A way whose pace changes: the walk at the pace of a time (each a walk of `gaitFor`; the same one for the same pace). None: `gait` throughout. */
+    gaitAt?: (t: number) => Gait;
     /** Where the way begins, on the floor; it goes straight along the body's forward unless `way` says otherwise. */
     origin: V3;
     /**
@@ -132,6 +134,8 @@ export interface CarryPlan {
      * be stretched straight.
      */
     airKnee?: number;
+    /** A foot of the body's own stance takes less of the walk's roll by rolling less on its sole; none: by being drawn toward lying flat (its contact point slips). */
+    rollOwn?: boolean;
     /** A foot that is in the air as the plan begins, with no hold before: how it is then. */
     airborne?: [FootNow | null, FootNow | null];
 }
@@ -162,8 +166,14 @@ export interface FootNow {
 export function carryFrames(body: Body, plan: CarryPlan, gaitStyle: GaitStyle = GAIT_STYLE, fps = 60): GaitFrame[] {
     const { left, up, fwd } = body;
     const g = plan.gait;
-    const pose = gaitPoser(body, g, gaitStyle);
-    const stride = g.speed * g.stride;
+    /** The walk at a time: the plan's one walk, or, where the pace changes, the walk at that time's pace. */
+    const gaitOf = (t: number): Gait => (plan.gaitAt ? plan.gaitAt(t) : g);
+    const kits = new Map<Gait, { pose: (t: number) => GaitPose; seen: Map<number, GaitPose> }>();
+    const kitOf = (G: Gait) => {
+        let kit = kits.get(G);
+        if (!kit) { kit = { pose: gaitPoser(body, G, gaitStyle), seen: new Map() }; kits.set(G, kit); }
+        return kit;
+    };
     const sole = soleRoll(body);
     const h = body.ankleHeight;
     const flatOf = (s: Stand): V3 => add(sub(s.at, scale(up, dot(s.at, up))), scale(up, body.floor + h));
@@ -175,13 +185,13 @@ export function carryFrames(body: Body, plan: CarryPlan, gaitStyle: GaitStyle = 
         return (u: number) => (u <= top ? minJerk(clamp(u / top, 0, 1)) : 1 - minJerk(clamp((u - top) / (1 - top), 0, 1)));
     };
     /** Where the walk has a foot's ankle standing flat in its `cycle`-th stride, in the walk's own world. */
-    const walkFlat = (foot: number, cycle: number): V3 =>
-        add(add(scale(fwd, stride * (cycle + 0.5 * foot) + g.lead), scale(left, (SIDE[foot] * g.width) / 2)), scale(up, body.floor + h));
-    const seen = new Map<number, GaitPose>();
-    /** The walk at a phase (kept: the same phases are asked for at every frame). */
-    const walkAt = (phase: number): GaitPose => {
-        let w = seen.get(phase);
-        if (!w) { w = pose(phase * g.stride); seen.set(phase, w); }
+    const walkFlat = (foot: number, cycle: number, G: Gait = g): V3 =>
+        add(add(scale(fwd, G.speed * G.stride * (cycle + 0.5 * foot) + G.lead), scale(left, (SIDE[foot] * G.width) / 2)), scale(up, body.floor + h));
+    /** A walk at a phase (kept: the same phases are asked for at every frame). */
+    const walkAt = (phase: number, G: Gait = g): GaitPose => {
+        const kit = kitOf(G);
+        let w = kit.seen.get(phase);
+        if (!w) { w = kit.pose(phase * G.stride); kit.seen.set(phase, w); }
         return w;
     };
 
@@ -201,7 +211,7 @@ export function carryFrames(body: Body, plan: CarryPlan, gaitStyle: GaitStyle = 
         if (kept) return kept;
         const w = clamp(plan.blend(t), 0, 1), turned = plan.facing(t);
         const wArm = plan.armBlend ? clamp(plan.armBlend(t), 0, 1) : w;
-        const W = walkAt(plan.phase(t));
+        const W = walkAt(plan.phase(t), gaitOf(t));
         // Where the body is on its way, and which way the way goes there.
         const gone = plan.travelled(t);
         const where = plan.way ? plan.way(gone) : { at: add(plan.origin, scale(fwd, gone)), heading: 0 };
@@ -292,12 +302,17 @@ export function carryFrames(body: Body, plan: CarryPlan, gaitStyle: GaitStyle = 
         const heading = hold.stand.heading + (hold.swivel ? hold.swivel(Math.min(t, hold.off)) : 0);
         let now: FootNow = { ankle: flat, pitch: 0, toes: 0, heading, way: heading, standing: true, floor: hold.up ?? 0 };
         if (hold.cycle !== null) {
-            const p = clamp((plan.phase(t) - (hold.cycle + 0.5 * foot)) / g.duty, 0, 1 - 1e-6);
-            const w = walkAt(hold.cycle + 0.5 * foot + p * g.duty);
+            const G = gaitOf(t);
+            const p = clamp((plan.phase(t) - (hold.cycle + 0.5 * foot)) / G.duty, 0, 1 - 1e-6);
+            const w = walkAt(hold.cycle + 0.5 * foot + p * G.duty, G);
             const f = w.feet[foot];
             const k = hold.own ? clamp(plan.blend(t), 0, 1) : 1;
-            const turn = axisAngle(up, heading - SIDE[foot] * g.toeOut);
-            now = { ...now, ankle: add(flat, rotate(turn, scale(sub(w.ankles[foot], f.flat), k))), pitch: f.pitch * k, toes: f.toes * k };
+            const turn = axisAngle(up, heading - SIDE[foot] * G.toeOut);
+            if (plan.rollOwn && hold.own && k < 1) {
+                // Less of the walk's roll, as a roll: the foot pitched by less, rolling on its sole without slipping.
+                const r = rolled(sole, h, f.pitch * k);
+                now = { ...now, ankle: add(add(flat, scale(along(body, heading), r.along)), scale(up, r.up)), pitch: f.pitch * k, toes: body.stiffToes ? f.pitch * k : Math.min(0, f.toes) * k };
+            } else now = { ...now, ankle: add(flat, rotate(turn, scale(sub(w.ankles[foot], f.flat), k))), pitch: f.pitch * k, toes: f.toes * k };
         }
         const socket = socketAt(foot, t);
         const straight = body.leg * (1 - 1e-4);
@@ -353,17 +368,19 @@ export function carryFrames(body: Body, plan: CarryPlan, gaitStyle: GaitStyle = 
                 floor: Math.min(from.floor ?? 0, to.floor ?? 0), through: u,
             };
         }
-        const flatW = walkFlat(foot, b.cycle);
-        const turn = axisAngle(up, b.stand.heading - SIDE[foot] * g.toeOut);
+        // (Where the pace changes, each pose of the walk is of its own time's walk, measured from that walk's own place.)
+        const Gn = gaitOf(t), G0 = gaitOf(began), G1 = gaitOf(b.on);
+        const gaitIn = (w: GaitPose) => (w === now ? Gn : w === w0 ? G0 : G1);
+        const flatIn = (w: GaitPose) => walkFlat(foot, b.cycle!, gaitIn(w));
         // The walk's swing, set down on the place: as a whole, or (a way that bends or climbs) following the way, each point
         // as far along it, as far to its side and as far over it as the walk has it from where it lands.
         const bent = plan.way && b.along !== undefined ? { way: plan.way, along: b.along, at: plan.way(b.along) } : null;
         const aside = bent ? dot(sub(flatOf(b.stand), bent.at.at), rotate(axisAngle(up, bent.at.heading), left)) : 0;
         const level = body.floor + h + (b.up ?? 0);
-        const veer = (w: GaitPose) => (bent ? bent.way(bent.along + dot(sub(w.ankles[foot], flatW), fwd)).heading - bent.at.heading : 0);
+        const veer = (w: GaitPose) => (bent ? bent.way(bent.along + dot(sub(w.ankles[foot], flatIn(w)), fwd)).heading - bent.at.heading : 0);
         const placed = (w: GaitPose): V3 => {
-            const d = sub(w.ankles[foot], flatW);
-            if (!bent) return add(flatOn(b), rotate(turn, d));
+            const d = sub(w.ankles[foot], flatIn(w));
+            if (!bent) return add(flatOn(b), rotate(axisAngle(up, b.stand.heading - SIDE[foot] * gaitIn(w).toeOut), d));
             const here = bent.way(bent.along + dot(d, fwd));
             const across = rotate(axisAngle(up, here.heading), left);
             const climbed = dot(here.at, up) - dot(bent.at.at, up);
@@ -371,15 +388,15 @@ export function carryFrames(body: Body, plan: CarryPlan, gaitStyle: GaitStyle = 
         };
         // The walk's swing at this time. (A foot that lands later than the walk's would is over its place in the walk's
         // time, and from then on as low as its leg lets it: it comes down with the hips.)
-        const now = walkAt(plan.phase(t)), w0 = walkAt(plan.phase(began)), w1 = walkAt(plan.phase(b.on));
+        const now = walkAt(plan.phase(t), Gn), w0 = walkAt(plan.phase(began), G0), w1 = walkAt(plan.phase(b.on), G1);
         /** The swing's own turn out and back. */
-        const own = (w: GaitPose) => w.feet[foot].heading - SIDE[foot] * g.toeOut;
+        const own = (w: GaitPose) => w.feet[foot].heading - SIDE[foot] * gaitIn(w).toeOut;
         let from: FootNow;
         if (inAir) from = inAir;
         else if (reaimed && b.walk) {
-            const real = axisAngle(up, b.walk.heading - SIDE[foot] * g.toeOut);
+            const real = axisAngle(up, b.walk.heading - SIDE[foot] * G0.toeOut);
             from = {
-                ankle: add(flatOf(b.walk), rotate(real, sub(w0.ankles[foot], flatW))),
+                ankle: add(flatOf(b.walk), rotate(real, sub(w0.ankles[foot], flatIn(w0)))),
                 pitch: w0.feet[foot].pitch, toes: w0.feet[foot].toes,
                 heading: b.walk.heading + own(w0), way: b.walk.heading, standing: false,
             };
@@ -469,8 +486,8 @@ export function carryFrames(body: Body, plan: CarryPlan, gaitStyle: GaitStyle = 
             const want = y < least - 1e-9 ? add(f.ankle, scale(up, least - y)) : f.ankle;
             // The knee: the leg's own way; walking, turned with the walk's legs and part of the way to where the body still
             // faces; standing, part of the way to where the pelvis faces.
-            const knee = f.way + b.w * (b.W.legTurn + plan.kneeFollow * (b.heading + b.turned - (f.way - SIDE[i] * g.toeOut)))
-                + (1 - b.w) * plan.standKnee * (standFacing + b.turned - f.way);
+            const knee = f.way + b.w * (b.W.legTurn + plan.kneeFollow * (b.heading + b.turned - (f.way - SIDE[i] * gaitOf(t).toeOut)))
+                + (1 - b.w) * plan.standKnee * (b.heading + standFacing + b.turned - f.way);
             // (A leg in the air keeps its knee bent, if the plan asks.)
             const leg = f.standing || !plan.airKnee ? legPose(body, socketAt(i, t), want, along(body, knee)) : legPose(body, socketAt(i, t), want, along(body, knee), airSpan);
             world[`${LEG[i]}UpperLeg`] = leg.upper;
@@ -1105,4 +1122,289 @@ export function walkSlope(
         return { ...f, travel: 0, hips: seen(f.hips), ankles: [seen(f.ankles[0]), seen(f.ankles[1])] as [V3, V3] };
     });
     return { plan, frames };
+}
+
+/** The numbers of a walk along a way whose pace changes, coming to rest and setting off again. */
+export interface AlongStyle {
+    /** The walk's shape is taken at no less than this pace, metres a second: slower, its steps keep that length and come further apart in time. */
+    least: number;
+    /** Setting off, the pose is all the walk's from this pace up and all the standing one at rest, the smoothest way between, metres a second. */
+    full: number;
+    /** Coming to rest, the pose stays the walk's until the foot behind leaves to come beside the other (or, with no time for that, until the last foot is down), then goes over to the standing one in so long, seconds. */
+    settleTime: number;
+    /** Once at rest the foot behind is stepped beside the other: how long after the body stops it leaves, and how long the step takes, seconds. */
+    close: [number, number];
+    /** The foot behind is no further than this from where it will stand as the body stops, metres: if it would be, the body takes one more step (quicker and shorter ones) before it stops. */
+    closeMost: number;
+    /** Coming to rest, the last foot to strike is this far into its stance as the body stops, strides: as far as brings it flat (it does not move again). */
+    settle: number;
+    /**
+     * Coming to rest the phase goes by time, at the cadence it had, from so long before the braking begins (seconds), so
+     * the feet keep stepping while the steps shorten (by distance the legs would all but stop with the body); and it is
+     * bent the smoothest way so that it stops so.
+     */
+    ahead: number;
+    /** Setting off another way than it faces: how long the body takes to come round, seconds; how much of the angle the first foot still lands turned toward where it stood; how much of the body's turn the foot that stays swivels before it leaves. */
+    turnTime: number;
+    landTurn: number;
+    swivel: number;
+    /** A knee points between where its foot points and where the body faces: the share of the way to the body. */
+    kneeFollow: number;
+    /** A foot left behind keeps its knee bent by this as its heel rises, degrees. */
+    pushKnee: number;
+    /**
+     * Where the way bends: the hips lean into the bend by this share of hip height for each g of sideways pull, and the
+     * footfalls are set in from the walk's line by these shares of hip height (the inner foot, the outer) for each radian
+     * the way turns in a stride (the one formula's turning walk: locomotion.ts LOCO_STYLE.turning).
+     */
+    bank: number;
+    track: [number, number];
+    /** Walking, the hips ride this share of hip height lower than the walk's own: room for the legs where the hips lean or the feet are set in. */
+    sink: number;
+}
+
+export const ALONG_STYLE: AlongStyle = { bank: 0.35, track: [0.038, -0.025], sink: 0, least: 0.3, full: 1, settleTime: 0.6, settle: 0.05, close: [0.05, 0.5], closeMost: 0.3, ahead: 0.4, turnTime: 1, landTurn: 0.15, swivel: 0.2, kneeFollow: 0.5, pushKnee: 16 };
+
+/**
+ * A walk along a way whose pace changes, from standing: `path` is where the body is over the floor at a time (model
+ * space; its first point is where it stands), over `seconds`. Where the path stays put the body comes to rest and stands;
+ * where it moves again the body sets off. The walk is taken at each time's pace (its step, cadence and shape follow the
+ * pace), and its phase goes by the distance gone. Coming to rest, the phase goes by time through the braking and is bent
+ * so that the last foot to strike has just landed as the body stops, on the stance's own place about where it stops; the
+ * foot behind is then stepped beside it. Setting off
+ * another way than it faces, it turns as it starts. The frames travel.
+ * `begin`: the stance it stands in at first (a point of the floor, in the same space as the path's first point taken as the
+ * body's own place, and a heading; and the standing pose, facing along heading 0 about the body's own place, where it is
+ * not the stance's own: the end of a turn); none: about where it stands, facing its way. `end`: the stance it ends in,
+ * if it comes to rest at the end.
+ */
+export function walkAlong(
+    body: Body, path: (t: number) => V3, seconds: number,
+    style: AlongStyle = ALONG_STYLE, gaitStyle: GaitStyle = GAIT_STYLE, turnStyle: TurnStyle = TURN_STYLE, fps = 60,
+    begin?: { pivot: V3; heading: number; stand?: GaitFrame },
+): { plan: CarryPlan; frames: GaitFrame[]; end: { pivot: V3; heading: number } | null } {
+    const { up, fwd, left } = body;
+    const origin = sub(body.ref.hips, scale(up, dot(body.ref.hips, up)));
+    const floorAt = add(origin, scale(up, body.floor));
+    // The way, finely: where the body is, how far it has gone, how fast it goes.
+    const n = Math.max(2, Math.ceil(seconds * 240)), dt = seconds / n;
+    const flat = (p: V3) => sub(p, scale(up, dot(p, up)));
+    const length = (v: V3) => Math.hypot(v[0], v[1], v[2]);
+    const p0 = flat(path(0));
+    const P: V3[] = [], S: number[] = [];
+    for (let k = 0; k <= n; k++) {
+        P.push(add(origin, sub(flat(path(k * dt)), p0)));
+        S.push(k ? S[k - 1] + length(sub(P[k], P[k - 1])) : 0);
+    }
+    const V = S.map((_, k) => (S[Math.min(n, k + 1)] - S[Math.max(0, k - 1)]) / ((Math.min(n, k + 1) - Math.max(0, k - 1)) * dt));
+    const at = (list: number[], t: number) => { const u = clamp(t / dt, 0, n), k = Math.min(n - 1, Math.floor(u)); return list[k] + (list[k + 1] - list[k]) * (u - k); };
+    // The way by distance: where along it, and which way it goes (from the stretches that move; straight on past its ends).
+    const knots: { s: number; at: V3; heading: number }[] = [];
+    let last = 0;
+    for (let k = 1; k <= n; k++) {
+        const d = sub(P[k], P[k - 1]);
+        if (length(d) < 1e-7) continue;
+        let heading = Math.atan2(dot(d, left), dot(d, fwd));
+        if (knots.length) heading = last + Math.atan2(Math.sin(heading - last), Math.cos(heading - last));
+        if (!knots.length) knots.push({ s: S[k - 1], at: P[k - 1], heading });
+        knots.push({ s: S[k], at: P[k], heading });
+        last = heading;
+    }
+    if (!knots.length) knots.push({ s: 0, at: P[0], heading: 0 }, { s: 1e-6, at: P[0], heading: 0 });
+    // (Counted from the way the body stands at first, whole turns off, so that it turns to its way the short way round.)
+    if (begin) { const whole = 2 * Math.PI * Math.round((begin.heading - knots[0].heading) / (2 * Math.PI)); for (const k of knots) k.heading += whole; }
+    const way = (s: number) => {
+        const a = knots[0], z = knots[knots.length - 1];
+        if (s <= a.s) return { at: add(a.at, scale(along(body, a.heading), s - a.s)), heading: a.heading };
+        if (s >= z.s) return { at: add(z.at, scale(along(body, z.heading), s - z.s)), heading: z.heading };
+        let lo = 0, hi = knots.length - 1;
+        while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (knots[mid].s <= s) lo = mid; else hi = mid; }
+        const x = knots[lo], y = knots[hi], u = (s - x.s) / Math.max(1e-12, y.s - x.s);
+        return { at: add(x.at, scale(sub(y.at, x.at), u)), heading: x.heading + (y.heading - x.heading) * u };
+    };
+    // The walk at each pace (one walk for each half cm/s: the same pace asks for the same walk, and the next is so near
+    // that going from one to the next does not jolt the hips).
+    const walks = new Map<number, Gait>();
+    const walkAt = (v: number) => {
+        const key = Math.round(Math.max(v, style.least) * 200);
+        let w = walks.get(key);
+        if (!w) { w = gaitFor(body, key / 200, gaitStyle); walks.set(key, w); }
+        return w;
+    };
+    const strideOf = (g: Gait) => g.speed * g.stride;
+    /** The stance's two places about a point of the floor, turned to a heading. */
+    const stance = (pivot: V3, heading: number): [Stand, Stand] =>
+        stanceFeet(body, turnStyle.stance, floorAt).map((st) => ({
+            at: add(pivot, rotate(axisAngle(up, heading), sub(st.at, floorAt))),
+            heading: st.heading + heading,
+        })) as [Stand, Stand];
+    // Standing at first: the left foot stays, the right steps first. The walk's phase begins where the walk would have the
+    // left foot where it stands (as a start does), so that the left leg still reaches it until its toes leave.
+    const startPivot = begin?.pivot ?? floorAt, startHeading = begin?.heading ?? way(0).heading;
+    const firstPair = stance(startPivot, startHeading);
+    // Setting off another way than it faces, the foot on the side it turns to steps first.
+    const turnBy = Math.atan2(Math.sin(way(0).heading - startHeading), Math.cos(way(0).heading - startHeading));
+    const stays = turnBy > 5 * DEG ? 1 : 0, steps = 1 - stays;
+    const g0 = walkAt(0);
+    const ahead0 = dot(sub(firstPair[stays].at, way(0).at), along(body, way(0).heading));
+    const phase0 = 0.5 * stays + style.settle + clamp((g0.lead - ahead0) / strideOf(g0), 0, 0.4);
+    // The phase by distance.
+    const inc = S.map((s, k) => (k < n ? (S[k + 1] - s) / strideOf(walkAt(V[k])) : 0));
+    const resting = (k: number) => V[k] < 1e-3;
+    const rests: [number, number][] = [];
+    for (let k = 1; k <= n; k++) if (resting(k) && !resting(k - 1)) { let e = k; while (e < n && resting(e + 1)) e++; rests.push([k, e]); }
+    // Coming to rest, the last foot is so far into its stance as the body stops: at least `settle`, and as far as the walk
+    // at rest has it lying flat (from then on it does not move).
+    const settle = (() => {
+        const g = walkAt(0), pose = gaitPoser(body, g, gaitStyle);
+        for (let p = style.settle; p <= 0.3; p += 0.0025) { const f = pose(p * g.stride).feet[0]; if (f.standing && Math.abs(f.pitch) < 1e-4 && Math.abs(f.toes) < 1e-4) return p; }
+        return style.settle;
+    })();
+    const phases: number[] = [phase0];
+    let from = 0;
+    const stops: { at: number; until: number; strike: number }[] = [];
+    for (const [a, b] of rests) {
+        // Where the braking begins (going back from the stop, as long as the pace was higher before), and a little before that.
+        let brakes = a;
+        while (brakes > from + 1 && V[brakes - 1] > V[brakes] + 1e-9) brakes--;
+        const w0 = Math.max(from, brakes - Math.round(style.ahead / dt));
+        for (let k = phases.length; k <= w0; k++) phases.push(phases[k - 1] + inc[k - 1]);
+        // At the cadence it had there, by time, it would be so far into the walk at the stop; bent to the nearest strike
+        // (the next one where the nearest would slow the feet too far).
+        const start = phases[w0], cadence = inc[w0] / dt, T = Math.max(dt, (a - w0) * dt);
+        const natural = start + cadence * T;
+        const bendFor = (m: number) => m / 2 + settle - natural;
+        /** Where the foot before the last comes down, against where the body stops (how far the foot behind is from its stance). */
+        const behindBy = (m: number) => {
+            const p = (m - 1) / 2;
+            let k = w0;
+            if (p < start) { while (k > 0 && phases[k] > p) k--; } else while (k < a && start + cadence * (k - w0) * dt + bendFor(m) * minJerk(((k - w0) * dt) / T) < p) k++;
+            return S[a] - (S[k] + walkAt(V[k]).lead);
+        };
+        let m = Math.round((natural - settle) * 2);
+        if (cadence + (bendFor(m) * 1.875) / T < 0.4 * cadence) m += 1;
+        // One more step while the foot behind would be dragged far (but the steps no more than two and a half times as quick).
+        while (behindBy(m) > style.closeMost && cadence + (bendFor(m + 1) * 1.875) / T <= 2.5 * cadence) m += 1;
+        const bend = bendFor(m);
+        for (let k = w0 + 1; k <= a; k++) { const tau = (k - w0) * dt; phases.push(start + cadence * tau + bend * minJerk(tau / T)); }
+        for (let k = a + 1; k <= b; k++) phases.push(phases[k - 1]);
+        stops.push({ at: a * dt, until: b * dt, strike: m });
+        from = b;
+    }
+    for (let k = phases.length; k <= n; k++) phases.push(phases[k - 1] + inc[k - 1]);
+    const phase = (t: number) => at(phases, t);
+    const timeOf = (p: number) => {
+        if (p <= phases[0]) return -Infinity;
+        if (p > phases[n]) return Infinity;
+        let lo = 0, hi = n;
+        while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (phases[mid] < p) lo = mid; else hi = mid; }
+        const u = (p - phases[lo]) / Math.max(1e-12, phases[hi] - phases[lo]);
+        return (lo + clamp(u, 0, 1)) * dt;
+    };
+    const travelled = (t: number) => at(S, t);
+    const paceAt = (t: number) => at(V, t);
+    /** How fast the way turns where the body is, radians a metre (to the left above zero). */
+    const bendAt = (s: number) => (way(s + 0.1).heading - way(s - 0.1).heading) / 0.2;
+
+    // Where the feet stand: the walk's footfalls along the way, each as far ahead of where the body is as it strikes as
+    // that time's walk has it, to its side of the way, pointing along it.
+    const footfall = (foot: number, cycle: number): Hold => {
+        const strike = cycle + 0.5 * foot;
+        const on = timeOf(strike);
+        const g = walkAt(paceAt(clamp(on, 0, seconds)));
+        const off = timeOf(strike + g.duty);
+        const s = travelled(clamp(on, 0, seconds)) + g.lead;
+        const here = way(s);
+        const across = rotate(axisAngle(up, here.heading), left);
+        // (Where the way bends, set in from the walk's line: the inner foot by track[0], the outer by track[1].)
+        const turns = bendAt(s) * strideOf(g), inner = turns >= 0 ? 0 : 1;
+        const setIn = turns * style.track[foot === inner ? 0 : 1] * body.hipHeight;
+        return { on, off, stand: { at: add(here.at, scale(across, ((foot ? -1 : 1) * g.width) / 2 + setIn)), heading: here.heading + (foot ? -1 : 1) * g.toeOut }, cycle, own: false, along: s };
+    };
+    const holds: [Hold[], Hold[]] = [[], []];
+    const top = Math.ceil(phases[n]) + 1;
+    for (let foot = 0; foot < 2; foot++) for (let cycle = 0; cycle <= top; cycle++) {
+        const hold = footfall(foot, cycle);
+        if (hold.off > 0 && hold.on < seconds) holds[foot].push(hold);
+    }
+    // Standing, the hips are over the stance, not over where the body's way is: from the start, or, coming to rest, as
+    // the foot behind is set beside the other (till then they stay between the two feet); setting off, back over the way.
+    const leans: { from: number; to: number; by: V3; close?: [number, number]; until?: number }[] = [];
+    const leanOver = (pivot: V3, t: number, from: number, to: number, close?: [number, number], until?: number) => {
+        leans.push({ from, to, by: sub(flat(pivot), flat(way(travelled(t)).at)), close, until });
+    };
+    const firstMove = (() => { let k = 0; while (k < n && V[k] < 1e-3) k++; return k * dt; })();
+    /** When the walk next has all the pose's weight after a time. */
+    const fullAfter = (t: number) => { let k = Math.ceil(t / dt); while (k < n && V[k] < style.full) k++; return k * dt; };
+    /** How far the body has come round to its way, setting off: 0 to 1. */
+    const turnedBy = (t: number) => minJerk((t - firstMove) / Math.max(1e-3, style.turnTime));
+    // The foot that stays, swivelling with the body until it leaves; the one that steps, from beside it, its first footfall
+    // still turned partly toward where it stood.
+    holds[stays][0] = { ...holds[stays][0], on: -Infinity, stand: firstPair[stays], own: true, swivel: (t) => style.swivel * turnBy * turnedBy(t) };
+    holds[steps] = holds[steps].filter((x) => x.cycle === null || x.cycle + 0.5 * steps > phase0);
+    if (holds[steps].length) holds[steps][0] = { ...holds[steps][0], stand: { ...holds[steps][0].stand, heading: holds[steps][0].stand.heading - style.landTurn * turnBy } };
+    holds[steps].unshift({ on: -Infinity, off: firstMove, stand: firstPair[steps], cycle: null, own: true });
+    leanOver(startPivot, 0, -Infinity, fullAfter(firstMove));
+    let end: { pivot: V3; heading: number } | null = null;
+    // Each stop: the foot that struck last stands on; the one behind is set beside it, where the stance has it. Until that
+    // foot behind leaves the body walks (a body already standing up could not reach the last footfall), then it stands up.
+    const settles: [number, number][] = [];
+    for (const stop of stops) {
+        const struck = stop.strike % 2 === 0 ? 0 : 1, behind = 1 - struck;
+        const front = holds[struck].findIndex((x) => x.cycle !== null && Math.abs(x.cycle + 0.5 * struck - stop.strike / 2) < 1e-9);
+        const back = holds[behind].findIndex((x) => x.cycle !== null && Math.abs(x.cycle + 0.5 * behind - (stop.strike / 2 - 0.5)) < 1e-9);
+        if (front < 0 || back < 0) continue;
+        // The last footfall is the stance's own place about where the body comes to rest, stepped onto by the walk (the one
+        // before it is the walk's own: aimed at the stance too, it would reach out ahead of a body still braking).
+        const here = way(travelled(stop.at));
+        const pivot = add(here.at, scale(up, body.floor));
+        const pair = stance(pivot, here.heading);
+        // (It is flat by the time the body stops, and stays as the walk has it then: it does not move again.)
+        holds[struck][front] = { ...holds[struck][front], stand: pair[struck] };
+        // Then the foot behind is stepped beside it, where the stance has it. The pose stays the walk's until that foot leaves
+        // (a body already standing up could not reach the last footfall), then it stands up over where it stopped.
+        // (It leaves when the walk has it leave, or soon after the body stops; it stands there until the body sets off again.)
+        const was = holds[behind][back];
+        const leave = Math.min(was.off, stop.at + style.close[0]), land = leave + style.close[1];
+        const setsOff = timeOf(stop.strike / 2 + settle + 1e-6);
+        let slowing = Math.floor(stop.at / dt);
+        while (slowing > 0 && V[slowing] < style.full) slowing--;
+        if (land < stop.until) {
+            holds[behind].splice(back, 1, { ...was, off: leave }, { on: land, off: setsOff, stand: pair[behind], cycle: null, own: true });
+            settles.push([slowing * dt, Math.max(slowing * dt, leave)]);
+            end = { pivot, heading: here.heading };
+        } else {
+            settles.push([slowing * dt, Math.max(slowing * dt, holds[struck][front].on)]);
+            end = null;
+        }
+    }
+    const comeRound = firstMove + style.turnTime;
+    const blend = (t: number) => {
+        let w = minJerk(clamp(paceAt(t) / Math.max(1e-3, style.full), 0, 1));
+        for (const [from, landed] of settles) if (t >= from) w = Math.max(w, t <= landed ? 1 : 1 - minJerk((t - landed) / Math.max(1e-3, style.settleTime)));
+        return w;
+    };
+    const plan: CarryPlan = {
+        seconds, gait: walkAt(Math.max(...V)), gaitAt: (t) => walkAt(paceAt(t)), origin, way, travelled, phase, blend,
+        // Standing at first the body faces as its stance does; setting off, it comes round to its way.
+        facing: (t) => (t < comeRound ? -turnBy * (1 - turnedBy(t)) : 0),
+        stand: begin?.stand ?? standFrame(body, turnStyle),
+        holds,
+        kneeFollow: style.kneeFollow, standKnee: turnStyle.kneeFollow, placeLift: turnStyle.lift, heel: turnStyle.heel,
+        bow: () => 0, headBow: 0,
+        lean: (t) => {
+            // Into the bend, by the sideways pull there (v² times how fast the way turns a metre).
+            const gone = travelled(t), v = paceAt(t);
+            const into = add(scale(rotate(axisAngle(up, way(gone).heading), left), style.bank * body.hipHeight * ((v * v * bendAt(gone)) / 9.81)), scale(up, -style.sink * body.hipHeight * blend(t)));
+            const near = leans.find((l) => t >= l.from && t <= l.to);
+            if (!near) return into;
+            const share = near.close && t < near.close[1] ? minJerk((t - near.close[0]) / Math.max(1e-3, near.close[1] - near.close[0]))
+                : near.until !== undefined && t < near.until ? 1 : 1 - blend(t);
+            return add(into, scale(near.by, share));
+        },
+        pushKnee: style.pushKnee * DEG,
+        rollOwn: true,
+    };
+    const restsAtEnd = stops.length > 0 && stops[stops.length - 1].until >= n * dt - 1e-9;
+    return { plan, frames: carryFrames(body, plan, gaitStyle, fps), end: restsAtEnd ? end : null };
 }

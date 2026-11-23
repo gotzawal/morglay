@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { clipOntoModel, framesToClip, framesToClipOnce } from '../../src/core/motionGen/bake';
 import { canonicalSkeleton, measureBody } from '../../src/core/motionGen/body';
 import { GAIT_STYLE, gaitCycle, gaitFor, gaitPoser, type GaitFrame, type GaitMode, type Vault } from '../../src/core/motionGen/gait';
-import { ARC_STYLE, carryFrames, PIVOT_STYLE, SLOPE_STYLE, START_STYLE, STOP_STYLE, walkArc, walkPivot, walkSlope, walkStart, walkStop, type ArcStyle } from '../../src/core/motionGen/carry';
+import { ARC_STYLE, carryFrames, PIVOT_STYLE, SLOPE_STYLE, START_STYLE, STOP_STYLE, walkAlong, walkArc, walkPivot, walkSlope, walkStart, walkStop, type ArcStyle } from '../../src/core/motionGen/carry';
 import { chainFollow } from '../../src/core/motionGen/chain';
-import { chainOf, LOCO_STYLE, locoLoop, locomote } from '../../src/core/motionGen/locomotion';
+import { chainOf, LOCO_STYLE, locoLoop, locomote, locoPath } from '../../src/core/motionGen/locomotion';
 import { GUARD_STYLE, guardGait, guardLine, stepGuard, walkGuard } from '../../src/core/motionGen/guard';
-import { soleRoll } from '../../src/core/motionGen/sole';
+import { rollTo, soleRoll } from '../../src/core/motionGen/sole';
 import { standFrame, TURN_STYLE, turnFor, turnFrames, type TurnStyle } from '../../src/core/motionGen/turn';
 const vaultOf = (m: GaitMode) => m.support as Vault;
 import { bridge, freeQuintic, minJerk, move, quintic, smoothCycle, viaCurve, wave } from '../../src/core/motionGen/tools';
@@ -1582,5 +1582,181 @@ describe('the chain in time: following a look that moves', () => {
         expect(late.pelvis).toBeCloseTo(goal.pelvis, 4);
         expect(late.chest).toBeCloseTo(goal.chest, 4);
         expect(late.head).toBeCloseTo(goal.head, 6);
+    });
+});
+
+describe('walking along a path: any pace, stops and turns', () => {
+    const sk = human();
+    const body = measureBody(sk, { roles: rolesOf(sk) });
+    const D = Math.PI / 180;
+    /** A path from its pace over time and its bend (radians a metre) over distance, `seconds` long. */
+    const pathOf = (pace: (t: number) => number, bend: (s: number) => number, seconds: number) => {
+        const h = 1 / 480, n = Math.ceil(seconds / h);
+        const xs = [0], zs = [0];
+        let x = 0, z = 0, s = 0, psi = 0;
+        for (let k = 0; k < n; k++) {
+            const ds = pace((k + 0.5) * h) * h;
+            psi += bend(s + ds / 2) * ds;
+            x += Math.sin(psi) * ds; z += Math.cos(psi) * ds; s += ds;
+            xs.push(x); zs.push(z);
+        }
+        return (t: number): Vec3 => {
+            const u = Math.min(n, Math.max(0, t / h)), k = Math.min(n - 1, Math.floor(u)), f = u - k;
+            return [xs[k] + (xs[k + 1] - xs[k]) * f, 0, zs[k] + (zs[k + 1] - zs[k]) * f];
+        };
+    };
+    /** Sets off at 0.4 s (in half a second), goes at `v`, brakes to rest from `stopAt` in 0.6 s. */
+    const goes = (v: number, stopAt: number) => (t: number) => v * minJerk((t - 0.4) / 0.5) * (1 - minJerk((t - stopAt) / 0.6));
+    const length = (list: Vec3[]) => list.slice(1).reduce((sum, p, k) => sum + far(p, list[k]), 0);
+    const yawOf = (q: Quat) => { const v = rot(q, [0, 0, 1]); return Math.atan2(v[0], v[2]); };
+    const wrap = (a: number) => a - 2 * Math.PI * Math.round(a / (2 * Math.PI));
+    const apart = (a: Quat, b: Quat) => 2 * Math.acos(Math.min(1, Math.abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3])));
+    /** The most a bone turns between two frames: how far (degrees), which bone, and when (the toes flex fast as a foot rolls: left out). */
+    const quickest = (frames: GaitFrame[]) => {
+        let most = 0, bone = '', time = 0;
+        for (let k = 1; k < frames.length; k++) for (const r of Object.keys(frames[k].world)) {
+            if (/Toes$/.test(r)) continue;
+            const a = apart(frames[k].world[r] as Quat, frames[k - 1].world[r] as Quat) / D;
+            if (a > most) { most = a; bone = r; time = frames[k].time; }
+        }
+        return { most, bone, time, text: `${bone} ${most.toFixed(1)} degrees at ${time.toFixed(2)} s` };
+    };
+
+    it('keeps its legs on its feet along a curve whose pace goes up and down and to nothing', () => {
+        const pace = (t: number) => (t < 6 ? goes(1.3, 5.2)(t) * (0.75 + 0.25 * Math.cos(t * 1.3)) : 0);
+        const { frames } = walkAlong(body, pathOf(pace, (s) => 0.5 * Math.sin((2 * Math.PI * s) / 6), 9), 9);
+        let short = 0, low = Infinity, near = Infinity;
+        for (const f of frames) {
+            for (let i = 0; i < 2; i++) {
+                if (f.stance[i]) short = Math.max(short, f.short[i]);
+                low = Math.min(low, f.ankles[i][1]);
+            }
+            near = Math.min(near, far(f.ankles[0], f.ankles[1]));
+        }
+        expect(short).toBeLessThan(1e-6);
+        expect(low).toBeGreaterThan(body.floor + body.ankleHeight - 0.02);
+        expect(near).toBeGreaterThan(0.05);
+        // Never a pop: no bone turns far between two frames.
+        const quick = quickest(frames);
+        expect(quick.most, quick.text).toBeLessThan(15);
+    });
+
+    it('does not move a foot that stands flat', () => {
+        const { frames } = walkAlong(body, pathOf(goes(1.2, 5), () => 0.2, 8), 8);
+        let slid = 0, flat = 0;
+        for (let k = 1; k < frames.length; k++) {
+            for (let i = 0; i < 2; i++) {
+                const a = frames[k - 1], b = frames[k];
+                if (!a.stance[i] || !b.stance[i]) continue;
+                // Standing flat: its toes point level, in both frames.
+                const level = (f: GaitFrame) => Math.abs(rot(f.world[i ? 'rightFoot' : 'leftFoot'] as Quat, [0, 0, 1])[1]) < 1e-4;
+                if (!level(a) || !level(b)) continue;
+                flat++;
+                slid = Math.max(slid, far(a.ankles[i], b.ankles[i]));
+            }
+        }
+        expect(flat).toBeGreaterThan(200);
+        expect(slid).toBeLessThan(5e-4);
+    });
+
+    it('stops with the last foot to land staying put and the other stepped beside it', () => {
+        const stopAt = 5;
+        const { frames } = walkAlong(body, pathOf(goes(1.3, stopAt), () => 0, 9), 9);
+        // From the end of the braking on: the hips are still, and one ankle never moves.
+        const rest = frames.filter((f) => f.time >= stopAt + 0.6);
+        expect(length(rest.map((f) => f.hips as Vec3))).toBeLessThan(0.03);
+        const travel = [0, 1].map((i) => length(rest.map((f) => f.ankles[i] as Vec3)));
+        expect(Math.min(...travel)).toBeLessThan(1e-3);
+        // The other one comes beside it by a short step, not a long drag, and lifts as it goes.
+        expect(Math.max(...travel)).toBeLessThan(0.3);
+        const last = frames[frames.length - 1];
+        expect(Math.abs(last.ankles[0][2] - last.ankles[1][2])).toBeLessThan(0.05);
+        expect(Math.abs(last.ankles[0][0] - last.ankles[1][0])).toBeGreaterThan(0.1);
+        expect(Math.abs(last.ankles[0][0] - last.ankles[1][0])).toBeLessThan(0.35);
+    });
+
+    it('takes shorter steps when it goes slower, without slowing its legs to a crawl', () => {
+        const stepsAt = (v: number) => {
+            const { frames } = walkAlong(body, pathOf(goes(v, 12), () => 0, 14), 14);
+            // The strikes between 3 s and 9 s, where the pace is steady: each foot's ankle when it lands.
+            const strikes: { t: number; z: number }[] = [];
+            for (let k = 1; k < frames.length; k++) {
+                const f = frames[k];
+                if (f.time < 3 || f.time > 9) continue;
+                for (let i = 0; i < 2; i++) if (f.stance[i] && !frames[k - 1].stance[i]) strikes.push({ t: f.time, z: f.ankles[i][2] });
+            }
+            expect(strikes.length).toBeGreaterThan(4);
+            const first = strikes[0], last = strikes[strikes.length - 1];
+            return { step: (last.z - first.z) / (strikes.length - 1) / 1, rate: (strikes.length - 1) / (last.t - first.t) };
+        };
+        const quick = stepsAt(1.4), slow = stepsAt(0.6);
+        // (The step a foot takes past the other's: the strikes alternate, so this is half a stride's travel in a step.)
+        expect(slow.step).toBeLessThan(0.75 * quick.step);
+        expect(slow.rate).toBeGreaterThan(0.55 * quick.rate);
+        expect(slow.rate).toBeLessThan(quick.rate);
+    });
+
+    it('sets off turning toward its way: the body comes round and no bone pops', () => {
+        // Standing facing +Z; the path goes off 80 degrees to the left (toward +X).
+        const way = 80 * D;
+        const pace = goes(1.3, 99);
+        const h = 1 / 480, seconds = 6, n = Math.ceil(seconds / h);
+        const gone = [0];
+        for (let k = 0; k < n; k++) gone.push(gone[k] + pace((k + 0.5) * h) * h);
+        const path = (t: number): Vec3 => {
+            const u = Math.min(n, Math.max(0, t / h)), k = Math.min(n - 1, Math.floor(u));
+            const s = gone[k] + (gone[k + 1] - gone[k]) * (u - k);
+            return [Math.sin(way) * s, 0, Math.cos(way) * s];
+        };
+        const { frames } = walkAlong(body, path, seconds, undefined, undefined, undefined, 60, { pivot: [0, body.floor, 0], heading: 0 });
+        const start = yawOf(frames[0].world.hips as Quat), end = yawOf(frames[frames.length - 1].world.hips as Quat);
+        expect(Math.abs(start)).toBeLessThan(15 * D);
+        expect(Math.abs(wrap(end - way))).toBeLessThan(25 * D);
+        // (A foot swinging round to the new way turns fast: what this guards against is a flip, not a quick turn.)
+        const quick = quickest(frames);
+        expect(quick.most, quick.text).toBeLessThan(20);
+    });
+
+    it('goes out, turns on the spot, comes back, stops and turns to its first way: the clip closes on itself', () => {
+        // Out 3 m, a rest, then back the way it came: more than half a turn, so it turns on the spot first.
+        const pace = (t: number) => (t < 5.2 ? goes(1.2, 2.4)(t) : goes(1.2, 2.4)(t - 5.2));
+        const h = 1 / 480, seconds = 9.5, n = Math.ceil(seconds / h);
+        const zs = [0];
+        let z = 0;
+        for (let k = 0; k < n; k++) { const t = (k + 0.5) * h; z += (t < 5.2 ? 1 : -1) * pace(t) * h; zs.push(z); }
+        const path = (t: number): Vec3 => { const u = Math.min(n, Math.max(0, t / h)), k = Math.min(n - 1, Math.floor(u)); return [0, 0, zs[k] + (zs[k + 1] - zs[k]) * (u - k)]; };
+        const frames = locoPath(body, path, seconds, LOCO_STYLE, undefined, undefined, 60, undefined, undefined, undefined, undefined, undefined, 0);
+        const first = frames[0], last = frames[frames.length - 1];
+        // Back where it began, standing as it stood.
+        expect(far(first.hips, last.hips)).toBeLessThan(0.02);
+        for (let i = 0; i < 2; i++) expect(far(first.ankles[i], last.ankles[i])).toBeLessThan(0.03);
+        let apartMost = 0;
+        for (const r of Object.keys(first.world)) apartMost = Math.max(apartMost, apart(first.world[r] as Quat, last.world[r] as Quat));
+        expect(apartMost / D).toBeLessThan(8);
+        // Halfway through the rest at the far end it faces back along its way, on the spot.
+        const far3 = frames.reduce((a, b) => (b.hips[2] > a.hips[2] ? b : a));
+        const turned = frames.filter((f) => f.time > far3.time + 0.5 && f.time < far3.time + 3 && Math.abs(f.hips[2] - far3.hips[2]) < 0.15);
+        const yaws = turned.map((f) => Math.abs(wrap(yawOf(f.world.hips as Quat) - 0)));
+        expect(Math.max(...yaws)).toBeGreaterThan(150 * D);
+        expect(Math.max(...turned.map((f) => far(f.hips, far3.hips)))).toBeLessThan(0.2);
+        // No bone pops along the whole of it.
+        const quick = quickest(frames);
+        expect(quick.most, quick.text).toBeLessThan(20);
+    });
+});
+
+describe('rolling a foot on its heel', () => {
+    it('finds the pitch that makes the leg reach where the hip is nearest the ankle part of the way up the roll', () => {
+        // The ankle turns about the heel; with the hip over it the ankle comes nearest the hip partway up, and further again
+        // beyond (a body with high ankles and a short heel). Looking only at the end of the range misses the pitch that reaches
+        // and stands the foot on end.
+        const heel = [{ x: 0, z: 0, at: 0, from: 0, to: Math.PI / 2, len: 0.12, rise: 1.2 }];
+        const want = 0.68;
+        const r = rollTo(heel, false, -0.22, 0.76, 0, want, 0);
+        expect(r.tight).toBe(false);
+        expect(r.far).toBeCloseTo(want, 6);
+        expect(r.rise).toBeLessThan(0.5);
+        // A leg that cannot reach at any pitch is still rolled as far as it goes.
+        expect(rollTo(heel, false, -0.22, 0.76, 0, 0.5, 0).tight).toBe(true);
     });
 });

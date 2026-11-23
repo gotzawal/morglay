@@ -49,6 +49,36 @@ The parts it is made of:
 
 All constants sit in one style object, `LOCO_STYLE`, so one fit reaches all of them.
 
+### 1.1 A path whose pace changes
+
+`locoPath(body, path, seconds)` (`locomotion.ts`) walks a whole path: where the capsule is at a time,
+going at any pace between rest and the walk's top, round bends, stopping and setting off again. The
+top pace is where the walk's stance share would fall to a half (faster, both feet leave the floor at
+once and it is no longer a walk). The path is cut where it rests (for 1.4 s or more); each stretch
+that moves is `walkAlong` (`carry.ts`), and a rest where the next stretch goes another way is a turn.
+
+- **The pace.** The walk is taken at each time's pace (one walk for each half cm/s), so slow walking
+  takes short steps at a cadence near an ordinary one, not long steps slowly. Its phase goes by the
+  distance gone, which keeps planted feet planted.
+- **Setting off.** From standing, the foot on the side the body turns to steps first, its first
+  footfall landing still turned part of the way toward where it stood; the other foot swivels as the
+  pelvis comes round; the body is round to its way in a second. Up to 135° it turns as it sets off;
+  further round it turns on the spot first (`turnFor`, `turnFrames`, its facing from the chain) and
+  stands on for a moment while the pelvis, chest and head come round.
+- **Stopping.** Braking, the phase goes by time (the feet keep stepping, the steps shorten) from just
+  before the pace falls, bent the smoothest way so that the body stops as the last foot to land has
+  just gone flat. That foot is the stance's own place about where the body stops, and does not move
+  again. The foot behind then leaves at its own time, lifts a little and is set down beside it. If it
+  would have to come further than `closeMost` (a stop straight after a sharp bend), the body takes one
+  more, quicker and shorter step first.
+- **Bends.** The hips lean into a bend by the sideways pull (`bank`) and the footfalls are set in from
+  the walk's line (`track`), as in a turning walk, so the inner foot stays within its leg's reach.
+- **A loop.** With `endHeading` the body turns on the spot to face that way after its last stop; a
+  path that ends where it began, facing as it began, gives a clip that closes on itself.
+
+The values are in `ALONG_STYLE`. They are set by hand and checked (below), not fitted to reference
+motions.
+
 ## 2. Fitting it to reference motions
 
 1. **Give each reference its inputs.** Write down its path (for a clip that moves the character, the
@@ -162,6 +192,19 @@ All constants sit in one style object, `LOCO_STYLE`, so one fit reaches all of t
 | Turn right about keeps more of the old walk | `pivot.from`, `pivot.drop` | change |
 | Turn on the spot: when each of the three steps goes | `turn.left.steps` / `turn.right.steps` | change |
 
+### Path walks (`ALONG_STYLE`)
+
+| Look | Term | Change |
+|---|---|---|
+| Slow walking takes shorter steps | `least` 0.3 m/s (the walk's shape is taken at no less than this pace) | lower |
+| The pose is all the walk's from this pace on | `full` 1 m/s | lower |
+| The feet keep their cadence longer while braking | `ahead` 0.4 s (the phase goes by time from so long before braking) | raise |
+| The foot behind leaves later or steps longer | `close` [0.05, 0.5] s | change |
+| One more step is taken sooner before a stop | `closeMost` 0.3 m | lower |
+| The body stands up slower after a stop | `settleTime` 0.6 s | raise |
+| Turning as it sets off: how long, how much the first foot lands turned, how much the other swivels | `turnTime` 1 s, `landTurn` 0.15, `swivel` 0.2 | change |
+| Leans further into a bend, sets its feet further in | `bank` 0.35, `track` | raise |
+
 ## 4. Lessons
 
 - **Carry what exists before writing new motion.** The start's curves are the ordinary walk after the
@@ -180,6 +223,17 @@ All constants sit in one style object, `LOCO_STYLE`, so one fit reaches all of t
   facing the same point, have the same path and look. The formula picks one; the other is a setting.
 - **A half turn is either way round.** Decide which way by a rule (behind counts as left), or by the
   leading foot.
+- **Braking is not walking slowly.** Letting the phase go by distance while braking froze the legs with
+  the body, then crammed the last step and the closing step into what time was left: a hesitation and
+  a slide. In the braking the phase goes by time, and the steps shorten instead.
+- **Stop where the last foot is flat.** A body that stops right after a heel strikes stands up while the
+  foot rolls flat: it looks like that foot slides. Stopping as it goes flat leaves it still; the other
+  foot is then the only one that moves, and it lifts.
+- **A step that would have to be dragged is a step to add.** After a sharp bend there is room for one
+  step in the braking; the foot behind then has half a metre to come. One more, shorter step first.
+- **Look for the minimum, not the end of the range.** Pitching a foot on its heel first brings the hip
+  closer to the ankle, then further. A search that only looked at the end of each pivot's range missed
+  the pitch that reaches, and put the toes straight up on a body with high ankles and a short heel.
 - **When a fit picks "never", read what it says.** The pelvis' and chest's springs went to many seconds
   on quick turns: they do not lead the legs there. A value no reference can show (how fast the body
   settles to a slowly moving look) is set for use, and its cost is written down.
@@ -188,6 +242,8 @@ All constants sit in one style object, `LOCO_STYLE`, so one fit reaches all of t
 
 - The path is analyzed as a whole, offline. Re-planning every frame for a live controller (a streaming
   engine) comes next.
+- Path walks (`ALONG_STYLE`) are set by hand and checked, not fitted to reference motions. A look that
+  is separate from the path (looking one way, walking another) is not yet part of them.
 - The start's lean and the stop's tuck are still constants of their rules, not terms of acceleration in
   the field.
 - The turn on the spot has its own pose builder (`turn.ts`). It takes its facing from the chain but is

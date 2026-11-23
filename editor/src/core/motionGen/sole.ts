@@ -100,7 +100,9 @@ export function rollTo(list: Pivot[], front: boolean, x: number, over: number, s
         // This point's share of the roll, cut where the arm would come too near to pointing at the hip.
         const most = least > 0 ? toward - k.rise - least : Infinity;
         const end = Math.max(k.from, Math.min(last ? Math.PI / 2 : k.to, most));
-        if (want >= far(end)) {
+        // (Pitching it turns the arm toward the hip, then past: the distance is least where the arm points at the hip. If
+        // that lies within this point's share, the leg reaches by then, on the way there.)
+        if (want >= far(Math.min(end, Math.max(k.from, toward - k.rise)))) {
             const open = Math.acos(clamp((m * m + side2 + k.len * k.len - want * want) / (2 * k.len * m), -1, 1));
             let rise = toward - k.rise - open;
             if (rise < k.from - 1e-9 || rise > end + 1e-9) rise = toward - k.rise + open;
