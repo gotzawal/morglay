@@ -76,7 +76,7 @@ that moves is `walkAlong` (`carry.ts`), and a rest where the next stretch goes a
 - **A loop.** With `endHeading` the body turns on the spot to face that way after its last stop; a
   path that ends where it began, facing as it began, gives a clip that closes on itself.
 
-`walkOnModel` (`pathWalk.ts`) does it for a model: it measures the body from the skeleton (and the sole from the mesh), walks a `Trail` (where the capsule is, 240 times a second, as [left, ahead] metres) and writes the clip into a copy of the model's GLB. The editor calls it when the Edelweiss Walk example opens, so the project holds a trail and the model as it came, and no clip. The way's direction is taken over at least 5 mm of it: over less, the rounding of a trail's points turns the way about.
+`walkOnModel` (`pathWalk.ts`) does it for a model: it measures the body from the skeleton (and the sole from the mesh), walks a `Trail` (where the capsule is, 240 times a second, as [left, ahead] metres) and writes the clip into a copy of the model's GLB. The editor calls it for any object whose animation names a trail (`animation.trail`) and whose model has no clip of that name: when the project opens, and again when the model is replaced. So a project holds a trail and the model as it came, and no clip. The way's direction is taken over at least 5 mm of it: over less, the rounding of a trail's points turns the way about.
 
 The values are in `ALONG_STYLE`. They are set by hand and checked (below), not fitted to reference
 motions.

@@ -181,6 +181,8 @@ export class Editor extends Emitter<EditorEvents> {
             this.isolatedShape = store.structureVersion;
             sync.setIsolation(new Set([this.isolated, ...store.descendants(this.isolated).map((n) => n.id)]));
         });
+        // An object whose animation names a trail gets its walk made on whatever model it shows (a project with one, a model replaced).
+        sync.on('model', (id: string) => this.walkIfAsked(id));
         store.on('load', () => {
             if (!this.isolated) return;
             this.isolated = null;
@@ -740,6 +742,26 @@ export class Editor extends Emitter<EditorEvents> {
         toast(`${file.name}: ${done[0].clip} added to ${targets.length === 1 ? targets[0].name : `${targets.length} objects`}.`, 'success');
     }
 
+    /** The model files a walk was asked of (with the trail and clip): each once, and an error is not tried again. */
+    private walks = new Set<string>();
+
+    /**
+     * An object whose animation names a trail (`animation.trail`) and whose loaded model has no clip of its clip's name gets the
+     * walk made on its own body: when a project with such an object opens, and when its model is replaced.
+     */
+    private walkIfAsked(id: string) {
+        const node = this.store.node(id);
+        const trail = node?.animation?.trail;
+        const state = node?.model ? this.sync.modelState(id) : null;
+        if (!node?.model || !trail || state?.status !== 'ready' || !state.info) return;
+        const clip = node.animation?.clip || 'Walk Path';
+        if (state.info.clips.includes(clip)) return;
+        const key = `${node.model.asset}:${trail}:${clip}`;
+        if (this.walks.has(key)) return;
+        this.walks.add(key);
+        void this.makePathWalk(id, trail, clip);
+    }
+
     /**
      * A walk made on a model object from a trail (a JSON file of where its capsule goes over time: core/motionGen/pathWalk.ts):
      * the motion formulas walk the trail on the model's own body, and the clip is written into a new copy of the model's file,
@@ -755,6 +777,8 @@ export class Editor extends Emitter<EditorEvents> {
             return;
         }
         try {
+            toast(`Making a walk for ${node.name}...`, 'info', 3000);
+            await new Promise((r) => setTimeout(r, 60));
             const made = walkOnModel(await blob.arrayBuffer(), JSON.parse(await trailBlob.text()) as Trail, clip);
             const meta = await putAsset(new Blob([made.glb as Uint8Array<ArrayBuffer>], { type: 'model/gltf-binary' }), old.name, 'model');
             this.store.transact('Make Walk', () => {
@@ -768,6 +792,9 @@ export class Editor extends Emitter<EditorEvents> {
                     if (!doc.nodes.some((n) => n.model?.asset === old.id)) doc.assets = doc.assets.filter((a) => a.id !== old.id);
                 });
             });
+            // The trail drawn on the floor, once.
+            const line = `${node.name} Path`;
+            if (!this.store.doc.nodes.some((n) => n.name === line)) await this.drawTrail(trailAsset, line);
             toast(`Made a walk of ${made.seconds.toFixed(0)} s for ${node.name}.`, 'success');
         } catch (e: any) {
             console.error(e);
@@ -2089,17 +2116,6 @@ export class Editor extends Emitter<EditorEvents> {
             try {
                 const { doc, camera } = await importProjectFolder(new URL(`examples/${folder}/`, document.baseURI).href);
                 this.loadDoc(doc, camera ?? defaultCamera());
-                // Her walk is not in the project: it is made now, on her own body, from the trail the project holds.
-                if (kind === 'edelweiss') {
-                    toast('Making her walk...', 'info', 4000);
-                    await new Promise((r) => setTimeout(r, 60));
-                    const her = this.store.doc.nodes.find((n) => n.name === 'Edelweiss' && n.model);
-                    const trail = this.store.doc.assets.find((a) => a.name === 'walk-trail.json');
-                    if (her && trail) {
-                        await this.makePathWalk(her.id, trail.id);
-                        await this.drawTrail(trail.id);
-                    }
-                }
             } catch (e: any) {
                 toast(`The example could not be opened: ${e?.message || e}`, 'error');
             }

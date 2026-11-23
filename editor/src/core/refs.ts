@@ -14,7 +14,7 @@ export interface Ref {
     /** An object's (a prefab template's too), the post chain's, a prefab's model, the environment's (the HDRI sky), or shader code. */
     at: 'object' | 'post' | 'prefab' | 'environment' | 'code';
     /** Of an asset: what it is to its holder, a texture's role, a model or a sound; unknown for shader code. */
-    role?: TextureRole | 'model' | 'audio';
+    role?: TextureRole | 'model' | 'audio' | 'trail';
     /** Takes the reference out (the holder goes back to its default); missing where that is not done. */
     drop?(): void;
 }
@@ -83,6 +83,7 @@ export function refs(doc: SceneDoc): Ref[] {
             params(m.params, 'object', m.shader);
         }
         if (n.model?.asset) out.push({ kind: 'asset', id: n.model.asset, at: 'object', role: 'model' });
+        if (n.animation?.trail) out.push({ kind: 'asset', id: n.animation.trail, at: 'object', role: 'trail', drop: () => (n.animation!.trail = null) });
         for (const o of Object.values(n.model?.materials ?? {})) {
             if (o.map) out.push({ kind: 'asset', id: o.map, at: 'object', role: 'color', drop: () => delete o.map });
             animeMaps(o.anime);
@@ -185,8 +186,8 @@ export function useCounts(doc: SceneDoc): { scripts: Map<string, number>; prefab
  * What each asset the scene uses is to it: texture roles, 'model', or
  * 'unknown' where only shader code names it (the game may load it any way).
  */
-export function assetRoles(doc: SceneDoc): Map<string, Set<TextureRole | 'model' | 'audio' | 'unknown'>> {
-    const out = new Map<string, Set<TextureRole | 'model' | 'audio' | 'unknown'>>();
+export function assetRoles(doc: SceneDoc): Map<string, Set<TextureRole | 'model' | 'audio' | 'trail' | 'unknown'>> {
+    const out = new Map<string, Set<TextureRole | 'model' | 'audio' | 'trail' | 'unknown'>>();
     for (const r of refs(doc)) {
         if (r.kind !== 'asset') continue;
         let set = out.get(r.id);

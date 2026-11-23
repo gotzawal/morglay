@@ -552,6 +552,7 @@ export const Animation = z.object({
     speed: num(1, 0, 10, { step: 0.05, description: 'Playback speed: 1 as made.' }),
     fade: num(0.25, 0, 5, { step: 0.05, title: 'Crossfade', description: 'Seconds one clip takes to blend into the next.' }),
     preview: bool(true, { description: 'Plays in the editor too, not only in Play.' }),
+    trail: asset({ title: 'Walk Trail', description: 'A trail asset (JSON: where the body goes over time). When the model has no clip of the name above, the editor makes one by walking this trail on the own body of the model (core/motionGen/pathWalk.ts), and again when the model is replaced.' }),
     ...Object.fromEntries(ANIMATION_MODES.map((m) => [m, modeClip(m)])) as Record<(typeof ANIMATION_MODES)[number], ReturnType<typeof modeClip>>,
 });
 export type AnimationDoc = z.output<typeof Animation>;
