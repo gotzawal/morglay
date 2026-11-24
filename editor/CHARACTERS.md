@@ -8,9 +8,19 @@ the license with it.
 
 Drop a model into the viewport: glTF / GLB, VRM 1.0, PMX (with its texture folder), or a character
 file (MGL, `.glb`). A PMX or VRM comes in with every slot set to Anime already, guessed from the
-material names; a plain glTF keeps its own materials until you switch them.
+material names; a plain glTF keeps its own materials until you switch them. **Import Model** and the
+Assets panel's import button take the same files.
 
-- **PMX:** drop the `.pmx` together with its textures.
+- **A package as it came (`.zip`):** drop the zip. Its models (`.pmx`, `.gltf`, `.glb`, `.vrm`) come
+  in as if their files had been dropped together.
+  - A PMX or a `.gltf` takes the images and buffers in the zip. A texture it names through folders is
+    the one in that folder, also when another folder holds a file of the same name.
+  - Beside a GLB or VRM, images are previews and are left out, as are readme files, other formats
+    (`.fbx`, `.blend`) and what zip tools add. The console lists what was left out.
+  - Names a zip does not mark as UTF-8 (zips made on Japanese, Chinese or Korean systems) are read in
+    the encoding under which the PMX finds its textures.
+  - A zip with a `project.json` at its root is a project and opens as one.
+- **PMX:** drop the `.pmx` together with its textures, or its package `.zip`.
   - A color texture named `…_D` brings the maps named like it along (names some model packages use):
     `…_N` (normal), `…_HN` (a hair's two normals, used before `…_N`, read as RG + BA), `…_P` (mask, read
     in the toon layout; a `…_M` stands in when there is no `…_P` and it is packed like one), `…_E`

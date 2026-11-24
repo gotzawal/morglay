@@ -8,7 +8,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { playFrames, sharedEditor } from './editor';
 import { measure } from './measure';
 import { buildZip, card, glbJson, playGame, quarterPixels } from './copies';
-import { base64, basisuGlb, dracoGlb, gridGlb, ktx2, meshoptGlb, png, pngGlb, quantizedGltf, solid } from './fixtures';
+import { base64, basisuGlb, dracoGlb, gridGlb, ktx2, meshoptGlb, png, pngGlb, quantizedGltf, solid, storedZip, tinyPmx } from './fixtures';
 import { rigGltf } from './rig';
 
 const problems: string[] = [];
@@ -83,6 +83,24 @@ test('unpacks meshopt data and never reads the fallback buffer (EXT_meshopt_comp
     const page = editor.page();
     const id = await importModel(page, 'Packed.glb', await meshoptGlb());
     expect(await loaded(page, id)).toMatchObject({ status: 'ready', size: [4, 2, 1], triangles: 12 });
+});
+
+test('imports a model package dropped as a .zip: a PMX with its texture folder, a VRM', async () => {
+    const page = editor.page();
+    const pmx = storedZip([
+        ['Model/model.pmx', tinyPmx('tex\\body_D.png')],
+        ['Model/tex/body_D.png', png(8, 8, solid(8, 8, [200, 40, 40, 255]))],
+        ['Model/readme.txt', new TextEncoder().encode('terms of use')],
+    ]);
+    const id = await importModel(page, 'Model.zip', pmx);
+    // The texture the model names through its folder came along into the converted model.
+    expect(await loaded(page, id)).toMatchObject({ status: 'ready', triangles: 2, texture: { name: 'body_D' } });
+    expect(await page.evaluate((id) => window.__editor.store.node(id)?.model?.materials?.body?.shading, id)).toBe('anime');
+    // A VRM comes as it is; the preview image beside it is not imported.
+    const before = await page.evaluate(() => window.__editor.store.doc.assets.length);
+    const vrm = await importModel(page, 'Avatar.zip', storedZip([['Avatar.vrm', pngGlb(png(4, 4, solid(4, 4, [0, 0, 255, 255])))], ['thumbnail.png', png(4, 4, solid(4, 4, [0, 0, 0, 255]))]]));
+    expect(await loaded(page, vrm)).toMatchObject({ status: 'ready', triangles: 2 });
+    expect(await page.evaluate((n) => window.__editor.store.doc.assets.slice(n).map((a) => a.name), before)).toEqual(['Avatar.vrm']);
 });
 
 test('decodes Draco with the decoder that ships with the engine', async () => {

@@ -3,6 +3,7 @@ import { PARTICLE_PRESETS, presetParticles } from './core/particles';
 import { makeCharacterNode } from './core/character';
 import { formatBytes, getAssetBlob, kindOf, putAsset } from './core/assets';
 import { externalUris, packGltf } from './core/gltfPack';
+import { fileByPath, MODEL_FILES, unpackModelPackage } from './core/modelPackage';
 import { convertPmx, isClipGlb } from './core/pmxImport';
 import { readMgl } from './core/mgl';
 import { infoFromMeta, mglExportInput, mglImportPlan } from './core/mglEditor';
@@ -672,7 +673,24 @@ export class Editor extends Emitter<EditorEvents> {
         for (const file of files) {
             const lower = file.name.toLowerCase();
             try {
-                if (lower.endsWith('.json') || lower.endsWith('.zip')) {
+                if (lower.endsWith('.zip')) {
+                    // A model package as it came (a PMX with its texture folders, a glTF, a VRM):
+                    // its files go in as if dropped together. A project file opens.
+                    const pkg = await unpackModelPackage(file);
+                    if (!pkg) {
+                        await this.openSceneFromFile(file);
+                        continue;
+                    }
+                    if (pkg.skipped.length) console.info(`${file.name}: left out ${pkg.skipped.length} file${pkg.skipped.length === 1 ? '' : 's'} (${pkg.skipped.slice(0, 8).join(', ')}${pkg.skipped.length > 8 ? ', …' : ''})`);
+                    if (pkg.encoding !== 'utf-8') console.info(`${file.name}: names read as ${pkg.encoding}`);
+                    if (!pkg.models.length) {
+                        toast(`${file.name} holds no model (.pmx, .gltf, .glb or .vrm) and is not a project.`, 'error');
+                        continue;
+                    }
+                    await this.importFiles(pkg.files, at);
+                    continue;
+                }
+                if (lower.endsWith('.json')) {
                     await this.openSceneFromFile(file);
                     continue;
                 }
@@ -954,7 +972,7 @@ export class Editor extends Emitter<EditorEvents> {
         const meta = this.store.doc.assets.find((a) => a.id === assetId);
         if (!meta) return;
         const spot = at ?? this.viewport.spawnPoint();
-        const node = makeNode(this.uniqueName(meta.name.replace(/\.(glb|gltf)$/i, ''), null), null, spot);
+        const node = makeNode(this.uniqueName(meta.name.replace(/\.(glb|gltf|vrm)$/i, ''), null), null, spot);
         node.position = tidy3(node.position, 3);
         node.model = { asset: assetId };
         this.insert([node], 'Add Model');
@@ -2141,8 +2159,9 @@ export class Editor extends Emitter<EditorEvents> {
         else toast(`Opened ${name}`, 'success');
     }
 
+    /** Models: GLB, glTF (with the files it names), VRM, PMX (with its textures), or a package of them as a .zip. */
     async importModelDialog() {
-        const files = await pickFiles('.glb,.gltf', true);
+        const files = await pickFiles(MODEL_FILES, true);
         if (files.length) await this.importFiles(files);
     }
 
@@ -2214,12 +2233,12 @@ function round(v: number): number {
 
 /** The file of a list that a URI in a .gltf names (by its file name). */
 function fileNamed(files: File[], uri: string): File | undefined {
-    let name = uri;
+    let path = uri;
     try {
-        name = decodeURIComponent(uri);
+        path = decodeURIComponent(uri);
     } catch { /* as written */ }
-    name = name.split(/[\\/]/).pop()!.toLowerCase();
-    return files.find((f) => f.name.toLowerCase() === name);
+    // By its name; of several of that name (folders of a package), the one in the folder the URI gives.
+    return fileByPath(files, path);
 }
 
 /** Merges an override patch into ModelDoc.materials / .parts, dropping empty entries. */
