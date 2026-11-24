@@ -132,6 +132,18 @@ export class EntityCollect {
         else list.push(renderNode);
     }
 
+    /**
+     * Transparent renderers draw in renderOrder. A renderer added again (its material changed, so its
+     * classification was refreshed) goes back after the last one with the same or a lower order. At
+     * the end of the list it would draw after every later layer until some renderer's order changed
+     * and the list was sorted again.
+     */
+    private static insertSorted(list: RenderNode[], renderNode: RenderNode) {
+        let i = list.length;
+        while (i > 0 && list[i - 1].renderOrder > renderNode.renderOrder) i--;
+        list.splice(i, 0, renderNode);
+    }
+
     private sortRenderNode(list: RenderNode[], renderNode: RenderNode) {
         for (let i = list.length - 1; i > 0; i--) {
             const element = list[i];
@@ -176,7 +188,7 @@ export class EntityCollect {
             if (!map.has(root)) {
                 map.set(root, []);
             }
-            if (isTransparent) map.get(root).push(renderNode);
+            if (isTransparent) EntityCollect.insertSorted(map.get(root), renderNode);
             else EntityCollect.insertGrouped(map.get(root), renderNode);
 
             if (root.view?.engine3D?.setting.occlusionQuery.octree) {
