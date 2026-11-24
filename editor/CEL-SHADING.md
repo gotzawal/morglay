@@ -57,14 +57,19 @@ materials do (color × 2.4 to the light's linear value, the engine's falloff), a
 | The shade keeps less of the base color's hue | the `0.5` in `celShadeTint` (how much of Shade Light Tint the shade, and a lit outline in shade, take) | raise |
 | Bright lit colors less washed out | Saturate Brights: `1.3` over `smoothstep(0.35, 0.85, luminance)` | raise 1.3, or lower the window |
 | Skin's light/shade edge more colored by the ramp | `edgeK` 0.5 (0.25 with a face map, where the edge takes the ramp's middle color) | raise |
-| Lit skin warmer, less pale | `1.3` in `mix(color, celSaturation(color, 1.3), lit)` (skin only) | raise |
+| Lit skin warmer, less pale | the `0.3` in `1.0 + 0.3 * (1.0 - smoothstep(0.6, 0.9, sat))` (skin only) | raise |
+| Makeup painted on the skin (around the eyes, blush) less vivid next to it | the window `0.6`–`0.9` where that boost fades out by the color's own saturation (`(max - min) / max`, linear; pale skin is near 0.45) | lower both |
 | Skin's silhouette tint closer to the edge | `1.0` in `smoothstep(0.15, 1.0, facing)` | lower |
 | Skin's sheen softer | its α floor `0.25` in the skin GGX (the sheen shows only where the key light reaches) | raise |
 
-Lit skin takes both saturation steps: its own `1.3`, and Saturate Brights on top (the skin kinds keep
-it on). Together, fully lit skin is 1.3 times as saturated up to a luminance of 0.35, 1.38 at 0.5,
-1.5 at 0.6, 1.61 at 0.7 and 1.69 from 0.85. Turn Saturate Brights off on a skin slot to keep only the
-first.
+Lit skin takes both saturation steps: its own (1.3 on pale skin), and Saturate Brights on top (the
+skin kinds keep it on). Together, fully lit pale skin is 1.3 times as saturated up to a luminance of
+0.35, 1.38 at 0.5, 1.5 at 0.6, 1.61 at 0.7 and 1.69 from 0.85. Turn Saturate Brights off on a skin
+slot to keep only the first.
+
+The first fades out on colors that are already saturated, as a vibrance control does. A flat 1.3
+turned the makeup painted above the lashes into a vivid orange band under the double-eyelid line,
+and the band read as a second line. Pale skin scored the same with and without the fade.
 
 ### Face shadow
 
@@ -73,6 +78,13 @@ first.
 | The face stays fully lit longer as the light turns | window start 36° (`0.2` in `celFaceLight`) | raise |
 | The face is fully shaded sooner | window end 150° (`0.2 + 0.6333`) | lower 0.6333 |
 | Softer edge | `0.05 + 0.25 · (1 − around)` | raise; the second part softens it while the light is in front |
+| Cast shadows reach less of the face's far side (where the face map gives the light, the head's own shadow is left out) | cast shadows fade in over `smoothstep(0.0, 0.4, N·L)` of the mesh normal (`celShadeSurface`) | raise 0.4 to let them in later; the face mask's green parts (neck, ears) are not gated |
+
+The gate exists because the shadow map cannot tell the head's own shadow from anything else's. On a
+surface turned from the light it only ever finds the head itself, since a closed shape hides its
+far side from the light. Without the gate, that shadow fell on the far cheek and jaw as a patch the
+face map never drew, whenever the map lit them. The gate covers both the light and the deeper cast
+shade.
 
 ### Cloth and metal highlight
 
@@ -141,3 +153,10 @@ first.
 - **Raising a metal's glint for its brightest parts:** light and grey metals share the term, so
   brighter silver parts came with over-bright grey parts. Matching both would need a term that tells
   them apart.
+- **Gating only the face's light, not the deeper cast shade, on the face's far side:** half of the
+  gain was lost. That shade then stays a fifth darker wherever the face map shades the far side.
+  The start of the gate (0 to 0.2, −0.1 to 0.1, 0 to 0.4) hardly mattered.
+- **A power falloff for the skin's saturation boost** (`1 + a · (1 − sat)^p`): with `p` 1 the band
+  of painted makeup stayed too vivid. With `p` 2 the skin scored worse: skin that is darker or warmer,
+  and so more saturated, lost its boost. A window over the saturation leaves pale and warm skin
+  alone.

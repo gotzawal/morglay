@@ -13,7 +13,8 @@
 // How it is built, each part for what it should look like (editor/CEL-SHADING.md, section 2):
 // - light and shade as a painter separates them: the form shadow in the shade color, cast shadows
 //   deeper; surfaces turned down get less of the key light (the body and the ground keep the sky
-//   from them), skin less so as light spreads inside it;
+//   from them), skin less so as light spreads inside it; a face's own shadow is the face shadow
+//   map's, so the face's far side takes no cast shadow from the head itself;
 // - cloth's highlights from the key light and from a studio light kept by the camera, so polished
 //   parts keep a highlight that moves with the view;
 // - hair's highlights as rings across the strands (smooth bands) that show within a window around
@@ -726,7 +727,15 @@ fn celShadeSurface(uv: vec2<f32>, base: vec4<f32>, geoN: vec3<f32>, V: vec3<f32>
     #endif
 
     // Cast shadows (where the face mask lets them fall) and the mask's light mask.
-    let castAmount = materialUniform.celBand.z * faceMask.b;
+    var castAmount = materialUniform.celBand.z * faceMask.b;
+    #if CEL_FACE_MAP
+        // Where the face map gives the light, a surface turned from the light takes no cast shadow
+        // (fading in over the first 0.4 of the cosine). The shadow map can only find the head itself
+        // there: a closed shape hides its own far side from the light. Its shadow would lie over the
+        // light the map gives the far cheek and jaw, as a patch the map never drew. Shadows of other
+        // things (hair, hands) still fall where the face turns toward the light.
+        castAmount *= mix(smoothstep(0.0, 0.4, dot(geoN, L)), 1.0, faceMask.g);
+    #endif
     lit *= mix(1.0, key.shadow, castAmount) * lightMask;
 
     // ------------------------------------------------ light and shade
@@ -759,11 +768,17 @@ fn celShadeSurface(uv: vec2<f32>, base: vec4<f32>, geoN: vec3<f32>, V: vec3<f32>
         #endif
         let edgeTint = edgeColor / max(celLuminance(edgeColor), 1e-3);
         color *= mix(vec3<f32>(1.0), edgeTint, (1.0 - abs(lit * 2.0 - 1.0)) * edgeK);
-        // Lit skin a third more saturated: a chosen look, so painted skin stays warm in the light
-        // rather than pale under the tone curve. With Saturate Brights on, as the skin kinds keep
-        // it, bright skin gets that too: lit skin ends up 1.3 times as saturated up to a luminance
-        // of 0.35, 1.38 at 0.5 and 1.69 from 0.85.
-        color = mix(color, celSaturation(color, 1.3), lit);
+        // Lit skin up to a third more saturated: a chosen look, so painted skin stays warm in the
+        // light rather than pale under the tone curve. As a vibrance control does, the boost fades
+        // out over colors already saturated (from 0.6 to 0.9, saturation being (max - min) / max of
+        // the linear color; pale skin sits near 0.45). Makeup painted on the skin (around the eyes,
+        // blush) keeps its own color instead of turning to a glowing orange line. With Saturate
+        // Brights on, as the skin kinds keep it, bright pale skin gets that too: it ends up 1.3
+        // times as saturated up to a luminance of 0.35, 1.38 at 0.5 and 1.69 from 0.85.
+        let hi = max(color.r, max(color.g, color.b));
+        let lo = min(color.r, min(color.g, color.b));
+        let sat = select(0.0, (hi - lo) / hi, hi > 1e-5);
+        color = mix(color, celSaturation(color, 1.0 + 0.3 * (1.0 - smoothstep(0.6, 0.9, sat))), lit);
     #endif
 
     #if CEL_SATURATE
@@ -1027,7 +1042,7 @@ export function makeCelShading({ resolveAnime, ENGINE_FIELDS, setEngineDefaults 
 
     const registered = () => {
         if (!names) {
-            names = { surface: 'morglay_cel_surface_38', outline: 'morglay_cel_outline_38' };
+            names = { surface: 'morglay_cel_surface_39', outline: 'morglay_cel_outline_39' };
             const src = sources();
             ShaderLib.register(names.surface, src.surface);
             ShaderLib.register(names.outline, src.outline);
