@@ -1,6 +1,10 @@
-// Minimal ZIP writer (PKWARE APPNOTE 6.3): text files are deflated with the
-// browser's CompressionStream, already compressed files (images, models)
-// are stored. No ZIP64, so each file and the archive stay below 4 GB.
+// Minimal ZIP writer and reader (PKWARE APPNOTE 6.3). The writer deflates text
+// files with the browser's CompressionStream and stores already compressed
+// files (images, models). The reader takes stored and deflated entries. No
+// ZIP64, so each file and the archive stay below 4 GB. Names a zip does not
+// mark as UTF-8 were written in the encoding of the system that made it
+// (model packages are often zipped on Japanese, Chinese or Korean systems):
+// they are read in the first encoding every such name decodes in.
 
 export interface ZipEntry {
     path: string;
@@ -123,11 +127,50 @@ async function inflate(data: Blob): Promise<Blob> {
 }
 
 /**
- * Reads a .zip archive into its files by path. Stored and deflated entries
- * are supported (what createZip and common zip tools write); folders are
- * skipped.
+ * The encodings tried, in order, for names a zip does not mark as UTF-8: UTF-8 (which
+ * many tools write without saying so), then the encodings of Japanese, Chinese and
+ * Korean systems.
  */
-export async function readZip(zip: Blob): Promise<Map<string, Blob>> {
+export const ZIP_NAME_ENCODINGS = ['utf-8', 'shift_jis', 'gbk', 'euc-kr', 'big5'] as const;
+
+/** One entry of a zip: its name as stored, and a reader for its data. */
+export interface ZipListing {
+    /** The name's bytes as stored. */
+    raw: Uint8Array;
+    /** The name, when the zip says how to read it (its UTF-8 flag, or a Unicode Path field); else null. */
+    unicode: string | null;
+    /** A folder (its name ends in a slash). */
+    folder: boolean;
+    /** Bytes once unpacked. */
+    size: number;
+    /** The entry's data, unpacked. */
+    read(): Promise<Blob>;
+}
+
+/** The name in an Info-ZIP Unicode Path field (0x7075) of `extra`, when it belongs to the name `raw`. */
+function unicodePath(extra: Uint8Array, raw: Uint8Array): string | null {
+    const view = new DataView(extra.buffer, extra.byteOffset, extra.byteLength);
+    for (let p = 0; p + 4 <= extra.length; ) {
+        const id = view.getUint16(p, true);
+        const len = view.getUint16(p + 2, true);
+        if (id === 0x7075 && len >= 5 && p + 4 + len <= extra.length && extra[p + 4] === 1 && view.getUint32(p + 5, true) === crc32(raw)) {
+            try {
+                return new TextDecoder('utf-8', { fatal: true }).decode(extra.subarray(p + 9, p + 4 + len));
+            } catch {
+                return null;
+            }
+        }
+        p += 4 + len;
+    }
+    return null;
+}
+
+/**
+ * The entries of a .zip archive, from its central directory. Nothing is unpacked until an
+ * entry is read. Stored and deflated entries can be read (what createZip and common zip
+ * tools write).
+ */
+export async function listZip(zip: Blob): Promise<ZipListing[]> {
     const size = zip.size;
     // The end of central directory record sits in the last 22 + 65535 bytes.
     const tailStart = Math.max(0, size - 22 - 0xffff);
@@ -145,27 +188,71 @@ export async function readZip(zip: Blob): Promise<Map<string, Blob>> {
     const cdOffset = tail.getUint32(eocd + 16, true);
     if (cdOffset + cdSize > size) throw new Error('The zip file is damaged or uses ZIP64, which is not supported.');
     const cd = new DataView(await zip.slice(cdOffset, cdOffset + cdSize).arrayBuffer());
-    const decoder = new TextDecoder();
-    const files = new Map<string, Blob>();
+    const utf8 = new TextDecoder();
+    const entries: ZipListing[] = [];
     let p = 0;
     for (let n = 0; n < count; n++) {
         if (p + 46 > cd.byteLength || cd.getUint32(p, true) !== 0x02014b50) throw new Error('The zip file is damaged.');
+        const flags = cd.getUint16(p + 8, true);
         const method = cd.getUint16(p + 10, true);
         const compressed = cd.getUint32(p + 20, true);
+        const unpacked = cd.getUint32(p + 24, true);
         const nameLen = cd.getUint16(p + 28, true);
         const extraLen = cd.getUint16(p + 30, true);
         const commentLen = cd.getUint16(p + 32, true);
         const localOffset = cd.getUint32(p + 42, true);
-        const name = decoder.decode(new Uint8Array(cd.buffer, cd.byteOffset + p + 46, nameLen));
+        const raw = new Uint8Array(cd.buffer, cd.byteOffset + p + 46, nameLen).slice();
+        const extra = new Uint8Array(cd.buffer, cd.byteOffset + p + 46 + nameLen, extraLen);
         p += 46 + nameLen + extraLen + commentLen;
-        if (name.endsWith('/')) continue;
-        const local = new DataView(await zip.slice(localOffset, localOffset + 30).arrayBuffer());
-        if (local.getUint32(0, true) !== 0x04034b50) throw new Error(`The zip entry ${name} is damaged.`);
-        const start = localOffset + 30 + local.getUint16(26, true) + local.getUint16(28, true);
-        const body = zip.slice(start, start + compressed);
-        if (method === 0) files.set(name, body);
-        else if (method === 8) files.set(name, await inflate(body));
-        else throw new Error(`The zip entry ${name} uses an unsupported compression method.`);
+        const unicode = flags & 0x0800 ? utf8.decode(raw) : unicodePath(extra, raw);
+        const label = unicode ?? utf8.decode(raw);
+        entries.push({
+            raw,
+            unicode,
+            folder: raw[raw.length - 1] === 0x2f,
+            size: unpacked,
+            async read() {
+                if (flags & 0x0001) throw new Error(`The zip entry ${label} is encrypted.`);
+                const local = new DataView(await zip.slice(localOffset, localOffset + 30).arrayBuffer());
+                if (local.getUint32(0, true) !== 0x04034b50) throw new Error(`The zip entry ${label} is damaged.`);
+                const start = localOffset + 30 + local.getUint16(26, true) + local.getUint16(28, true);
+                const body = zip.slice(start, start + compressed);
+                if (method === 0) return body;
+                if (method === 8) return inflate(body);
+                throw new Error(`The zip entry ${label} uses an unsupported compression method.`);
+            },
+        });
     }
+    return entries;
+}
+
+/** The encodings, of ZIP_NAME_ENCODINGS in order, that every name of `entries` decodes in. */
+export function zipNameEncodings(entries: readonly ZipListing[]): string[] {
+    const unmarked = entries.filter((e) => e.unicode === null && e.raw.some((b) => b > 0x7f));
+    return ZIP_NAME_ENCODINGS.filter((encoding) => {
+        try {
+            const decoder = new TextDecoder(encoding, { fatal: true });
+            for (const e of unmarked) decoder.decode(e.raw);
+            return true;
+        } catch {
+            return false;
+        }
+    });
+}
+
+/** An entry's name read in `encoding` (bytes that do not decode become U+FFFD). */
+export function zipEntryName(entry: ZipListing, encoding: string): string {
+    return entry.unicode ?? new TextDecoder(encoding).decode(entry.raw);
+}
+
+/**
+ * Reads a .zip archive into its files by path, folders left out. Names are read as the zip
+ * marks them, else in the first encoding that reads them all.
+ */
+export async function readZip(zip: Blob): Promise<Map<string, Blob>> {
+    const entries = await listZip(zip);
+    const encoding = zipNameEncodings(entries)[0] ?? 'utf-8';
+    const files = new Map<string, Blob>();
+    for (const e of entries) if (!e.folder) files.set(zipEntryName(e, encoding), await e.read());
     return files;
 }

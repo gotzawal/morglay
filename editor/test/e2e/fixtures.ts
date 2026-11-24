@@ -363,3 +363,81 @@ export function unzip(zip: Uint8Array): Map<string, Uint8Array> {
     }
     return out;
 }
+
+/** A tiny PMX 2.0 (MikuMikuDance): one quad, one material whose texture is `texture`, one bone. */
+export function tinyPmx(texture: string): Uint8Array {
+    const out: number[] = [];
+    const u8 = (v: number) => out.push(v & 255);
+    const i8 = (v: number) => u8(v < 0 ? 256 + v : v);
+    const u16 = (v: number) => { u8(v); u8(v >> 8); };
+    const i32 = (v: number) => new Uint8Array(new Int32Array([v]).buffer).forEach((x) => u8(x));
+    const f32 = (v: number) => new Uint8Array(new Float32Array([v]).buffer).forEach((x) => u8(x));
+    const text = (s: string) => { i32(s.length * 2); for (const ch of s) u16(ch.charCodeAt(0)); };
+    [0x50, 0x4d, 0x58, 0x20].forEach(u8);
+    f32(2);
+    u8(8);
+    [0, 0, 1, 1, 1, 1, 1, 1].forEach(u8);
+    text('model'); text('model'); text(''); text('');
+    const quad = [[-1, 0, 0, 0, 1], [1, 0, 0, 1, 1], [1, 2, 0, 1, 0], [-1, 2, 0, 0, 0]];
+    i32(4);
+    quad.forEach(([x, y, z, u, v]) => { f32(x); f32(y); f32(z); f32(0); f32(0); f32(-1); f32(u); f32(v); u8(0); i8(0); f32(1); });
+    i32(6);
+    [0, 1, 2, 0, 2, 3].forEach(u8);
+    i32(1); text(texture);
+    i32(1);
+    text('body'); text('body');
+    f32(1); f32(1); f32(1); f32(1);
+    f32(0); f32(0); f32(0); f32(5);
+    f32(0.5); f32(0.5); f32(0.5);
+    u8(0x10);
+    f32(0); f32(0); f32(0); f32(1); f32(0.6);
+    i8(0); i8(-1); u8(0); u8(1); u8(1);
+    text('');
+    i32(6);
+    i32(1);
+    text('center'); text('center'); f32(0); f32(0); f32(0); i8(-1); i32(0); u16(0x0001); i8(1);
+    i32(0); i32(0); i32(0); i32(0);
+    return new Uint8Array(out);
+}
+
+/** A .zip of stored entries with UTF-8 names, as a package of files comes. */
+export function storedZip(entries: [string, Uint8Array][]): Uint8Array {
+    const parts: Buffer[] = [];
+    const central: Buffer[] = [];
+    let offset = 0;
+    for (const [path, data] of entries) {
+        const name = Buffer.from(path, 'utf8');
+        const crc = crc32(data);
+        const local = Buffer.alloc(30 + name.length);
+        local.writeUInt32LE(0x04034b50, 0);
+        local.writeUInt16LE(20, 4);
+        local.writeUInt16LE(0x0800, 6);
+        local.writeUInt32LE(crc, 14);
+        local.writeUInt32LE(data.length, 18);
+        local.writeUInt32LE(data.length, 22);
+        local.writeUInt16LE(name.length, 26);
+        name.copy(local, 30);
+        parts.push(local, Buffer.from(data));
+        const cd = Buffer.alloc(46 + name.length);
+        cd.writeUInt32LE(0x02014b50, 0);
+        cd.writeUInt16LE(20, 4);
+        cd.writeUInt16LE(20, 6);
+        cd.writeUInt16LE(0x0800, 8);
+        cd.writeUInt32LE(crc, 16);
+        cd.writeUInt32LE(data.length, 20);
+        cd.writeUInt32LE(data.length, 24);
+        cd.writeUInt16LE(name.length, 28);
+        cd.writeUInt32LE(offset, 42);
+        name.copy(cd, 46);
+        central.push(cd);
+        offset += local.length + data.length;
+    }
+    const size = central.reduce((s, c) => s + c.length, 0);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(entries.length, 8);
+    end.writeUInt16LE(entries.length, 10);
+    end.writeUInt32LE(size, 12);
+    end.writeUInt32LE(offset, 16);
+    return new Uint8Array(Buffer.concat([...parts, ...central, end]));
+}

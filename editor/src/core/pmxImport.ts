@@ -8,6 +8,7 @@
 // GLBs dropped with it (a Biped body's motions) are retargeted onto its
 // bones and go into the same GLB (core/retarget.ts).
 
+import { fileByPath } from './modelPackage';
 import { isPmx, parsePmx } from './pmx';
 import { isOpaqueIris, isToonMask } from './pmxMaps';
 import { isIrisMaterial, pmxSkeleton, pmxToGlb, type PmxImage, type PmxSlot } from './pmxToGlb';
@@ -35,10 +36,12 @@ export async function isClipGlb(file: File): Promise<boolean> {
 
 const baseName = (path: string) => path.split(/[\\/]/).pop()!.toLowerCase();
 
-/** The file among `files` a path of the model names, by its name. */
+/**
+ * The file among `files` a path of the model names, by its name. Of several files of that
+ * name (folders of a package), the one in the folder the path gives.
+ */
 export function fileForPath(files: readonly File[], path: string): File | undefined {
-    const name = baseName(path);
-    return files.find((f) => f.name.toLowerCase() === name);
+    return fileByPath(files, path);
 }
 
 /** The map named <stem>_<suffix> that goes with a color texture: its extension first, else PNG or JPEG, any case. */

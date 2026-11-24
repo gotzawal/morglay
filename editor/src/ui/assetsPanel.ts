@@ -3,6 +3,7 @@ import { useCounts } from '../core/refs';
 import { onChanges, touches } from './batch';
 import { formatBytes } from '../core/assets';
 import { shipsAsIs } from '../core/derived';
+import { MODEL_FILES } from '../core/modelPackage';
 import { toast } from '../core/messages';
 import { pickFiles } from '../core/persistence';
 import { SCRIPT_TEMPLATES, SHADER_TEMPLATES } from '../core/templates';
@@ -40,8 +41,8 @@ export class AssetsPanel {
                     showMenu(createAssetMenu(editor), r.left, r.bottom + 4);
                 }),
                 iconButton('library', 'Library: models, materials and skies to use', () => openLibraryDialog(editor)),
-                iconButton('upload', 'Import models, images or sounds', async () => {
-                    const files = await pickFiles('.glb,.gltf,image/*,audio/*,.ogg,.opus,.m4a,.flac', true);
+                iconButton('upload', 'Import models (GLB, glTF, VRM, PMX, or a .zip package of one), images or sounds', async () => {
+                    const files = await pickFiles(`${MODEL_FILES},audio/*,.ogg,.opus,.m4a,.flac`, true);
                     if (files.length) await editor.importFiles(files);
                 }),
                 iconButton('sliders', 'Compression', (e) => {
