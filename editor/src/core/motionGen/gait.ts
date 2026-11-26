@@ -722,7 +722,7 @@ function leastOver(of: (t: number) => number, stride: number, count: number): nu
     let a = ((k0 - 1) * stride) / count, b = ((k0 + 1) * stride) / count;
     const r = (Math.sqrt(5) - 1) / 2;
     let c = b - r * (b - a), d = a + r * (b - a), fc = of(c), fd = of(d);
-    for (let it = 0; it < 30; it++) {
+    for (let it = 0; it < 16; it++) {
         if (fc < fd) { b = d; d = c; fd = fc; c = b - r * (b - a); fc = of(c); } else { a = c; c = d; fc = fd; d = a + r * (b - a); fd = of(d); }
     }
     return Math.min(least, fc, fd);
@@ -1066,7 +1066,7 @@ export function gaitFor(body: Body, speed: number, style: GaitStyle = GAIT_STYLE
     if (own.ok) return own.g;
     let lo = 0.5 * natural, hi = natural;
     if (!withStep(lo).ok) return withStep(lo).g;
-    for (let k = 0; k < 20; k++) { const mid = (lo + hi) / 2; if (withStep(mid).ok) lo = mid; else hi = mid; }
+    for (let k = 0; k < 12; k++) { const mid = (lo + hi) / 2; if (withStep(mid).ok) lo = mid; else hi = mid; }
     return withStep(lo).g;
 }
 

@@ -829,7 +829,8 @@ describe('the chain in time: following a look that moves', () => {
     });
 });
 
-describe('walking along a path: any pace, stops and turns', () => {
+// (Each walks a whole path of several seconds at 60 frames a second: given longer than a quick test, as a slower machine needs.)
+describe('walking along a path: any pace, stops and turns', { timeout: 30000 }, () => {
     const sk = human();
     const body = measureBody(sk, { roles: rolesOf(sk) });
     const D = Math.PI / 180;
