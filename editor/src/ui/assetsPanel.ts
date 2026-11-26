@@ -4,6 +4,7 @@ import { onChanges, touches } from './batch';
 import { formatBytes } from '../core/assets';
 import { shipsAsIs } from '../core/derived';
 import { MODEL_FILES } from '../core/modelPackage';
+import { isPathAsset } from '../core/motionPath';
 import { toast } from '../core/messages';
 import { pickFiles } from '../core/persistence';
 import { SCRIPT_TEMPLATES, SHADER_TEMPLATES } from '../core/templates';
@@ -41,8 +42,8 @@ export class AssetsPanel {
                     showMenu(createAssetMenu(editor), r.left, r.bottom + 4);
                 }),
                 iconButton('library', 'Library: models, materials and skies to use', () => openLibraryDialog(editor)),
-                iconButton('upload', 'Import models (GLB, glTF, VRM, PMX, or a .zip package of one), images or sounds', async () => {
-                    const files = await pickFiles(`${MODEL_FILES},audio/*,.ogg,.opus,.m4a,.flac`, true);
+                iconButton('upload', 'Import models (GLB, glTF, VRM, PMX, or a .zip package of one), motions (GLBs of clips only), paths (.path.json), images or sounds', async () => {
+                    const files = await pickFiles(`${MODEL_FILES},.json,audio/*,.ogg,.opus,.m4a,.flac`, true);
                     if (files.length) await editor.importFiles(files);
                 }),
                 iconButton('sliders', 'Compression', (e) => {
@@ -118,6 +119,17 @@ export class AssetsPanel {
             );
         }
         for (const a of assets) {
+            // A path a walk follows, or a motion: models play them (their Animation section lists them).
+            if (a.kind === 'clip' || isPathAsset(a)) {
+                const path = a.kind !== 'clip';
+                this.list.appendChild(
+                    this.item(a.id, path ? 'walk' : 'play', a.name, formatBytes(a.size), '', path ? 'Path: where a walk goes and when. Drag onto a model, or double-click to have the selected model walk it' : 'Animation: drag onto a model, or double-click to have the selected model play it', () => this.use(a.id), [
+                        { label: path ? 'Walk It with Selection' : 'Play on Selection', icon: 'plus', action: () => this.use(a.id) },
+                        { label: 'Remove from Project', icon: 'trash', action: () => this.editor.removeAsset(a.id) },
+                    ]),
+                );
+                continue;
+            }
             if (a.kind === 'data') {
                 // A terrain's heights or paint: the terrain shows and changes it (Inspector, sculpting).
                 this.list.appendChild(
@@ -201,6 +213,11 @@ export class AssetsPanel {
         if (asset.kind === 'model') this.editor.addModel(id, undefined, true);
         else if (asset.kind === 'audio') this.editor.store.select(this.editor.addSound(id, this.editor.store.selection));
         else if (asset.kind === 'texture') this.editor.applyTexture(id);
+        else if (asset.kind === 'clip' || isPathAsset(asset)) {
+            void this.editor.addAnimationSource(id).then((ids) => {
+                if (!ids.length) toast(`Select a model to play ${asset.name} on.`, 'info');
+            });
+        }
     }
 }
 

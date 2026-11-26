@@ -59,7 +59,8 @@ export async function fingerprint(blob: Blob): Promise<string | undefined> {
 export async function putAsset(blob: Blob, name: string, kind: AssetKind, id = uid('a'), extra: Partial<AssetMeta> = {}): Promise<AssetMeta> {
     const meta: AssetMeta = { ...extra, id, name, kind, mime: blob.type || guessMime(name), size: blob.size };
     // Textures and models get a fingerprint: a compressed copy made from other bytes under this id is stale (core/derived.ts).
-    if (kind === 'texture' || kind === 'model') {
+    // So do clips and data: the clips a model's animation makes from them are made again from other bytes (core/clipSources.ts).
+    if (kind === 'texture' || kind === 'model' || kind === 'clip' || kind === 'data') {
         const hash = await fingerprint(blob);
         if (hash) meta.hash = hash;
     }

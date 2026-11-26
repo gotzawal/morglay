@@ -1,53 +1,29 @@
 # Procedural motion
 
-How the editor makes a character walk from formulas (`src/core/motionGen/`), what goes in, how its
-constants were fitted to reference motions, and which term to change, in which direction, for a given
-look. Nothing here plays a stored clip: every pose is computed. Reference motions are used only to fit
-the constants, and only by comparing curves.
+How the editor makes a character walk from formulas (`src/core/motionGen/`), what goes in, how it is
+checked, and which term to change, in which direction, for a given look. Nothing here plays a stored
+clip: every pose is computed.
 
-## 1. One formula, two inputs
+## 1. A path walked
 
-`locomote(body, run)` (`locomotion.ts`) makes every walk. It takes:
-
-- **The path:** where the character's capsule goes, as a point of the floor at any time. Speed, the turn
-  of the way, its grade and its acceleration all come from it.
-- **The look:** which way the character looks, as a direction at any time. Without one it looks along
-  its path, `ahead` strides on.
-- **The first state:** standing (facing some way), or walking (speed, phase of the walk, heading).
-- **The posture:** ordinary or on guard. This is a setting of the character, not an input.
-
-From these it picks the rule that carries the body:
-
-| The inputs | Rule | Made by |
-|---|---|---|
-| A path that goes on | steady walk: straight, round a bend, up or down a slope, on guard in any direction | `locoLoop` |
-| Standing, then a path that moves | start, turning to the way it goes | `walkStart` (`carry.ts`) |
-| Walking, then a path that comes to rest | stop | `walkStop` |
-| Walking, then a path that turns back | turn right about | `walkPivot` |
-| Standing, a path that stays, a look elsewhere | turn on the spot, in three steps | `turnFor`, `turnFrames` (`turn.ts`) |
-| Standing on guard | stepping on the spot | `stepGuard` (`guard.ts`) |
-
-The parts it is made of:
+The editor makes a walk from a path: where the character's capsule is over the floor at each time.
+`locoPath(body, path, seconds)` (`locomotion.ts`) walks it, starting and stopping, round its bends, and
+turning on the spot where it rests to set off another way. The parts it is made of:
 
 - **The walk** (`gait.ts`): one stride at one speed, from the body's proportions. Its step, cadence,
   duty factor, knee course, swing and arm swing are laws of the speed (the Froude number), so one set of
   values serves any body size.
-- **Carrying** (`carry.ts`): the walk is carried onto footfalls planned from the path. A planted foot does
-  not move and rolls as the walk's foot does at that phase. A foot in the air is the walk's own swing,
-  set down on its next place and bent along the way. The legs reach their feet by two-bone IK. A foot
-  lands only when its leg can reach the place.
-- **The chain** (`chain.ts`): the body's facing. The angle between the look and the line the legs walk
-  on is shared out: the pelvis and the chest take their shares, the head a share of the rest, each
-  within its reach. What none can reach is left short. The feet turn toward the look too, the one on the
-  look's side more. When the look moves, each part follows by a critically damped spring of its own:
-  the head first, the pelvis last.
-- **The field** (`locomotion.ts`): the rest of the body (leaning into a turn, curling up a slope,
-  crouching on guard, arm swing ...). Each is a sum of terms of the controls: turn per stride, grade and
-  posture.
-- **The rules' constants** (`LOCO_STYLE.rules`): the start's, stop's, turn right about's, turn on the
-  spot's and guard step's own timings and placements.
-
-All constants sit in one style object, `LOCO_STYLE`, so one fit reaches all of them.
+- **Carrying** (`carry.ts` `walkAlong`): the walk of each moment's pace is carried onto footfalls planned
+  from the path. A planted foot does not move and rolls as the walk's foot does at that phase. A foot in
+  the air is the walk's own swing, set down on its next place and bent along the way. The legs reach
+  their feet by two-bone IK. A foot lands only when its leg can reach the place.
+- **The turn on the spot** (`turn.ts`): three steps round the place the body turns about, a rule the same
+  to both sides (a turn to the right is the turn to the left in a mirror; only the stance's own feet
+  differ).
+- **The chain** (`chain.ts`): the body's facing as it turns on the spot. The angle between where it will
+  face and the line its feet have turned is shared out: the pelvis and the chest take their shares, the
+  head a share of the rest, each within its reach. Each part follows by a critically damped spring of
+  its own: the head first, the pelvis last.
 
 ### 1.1 A path whose pace changes
 
@@ -57,142 +33,183 @@ top pace is where the walk's stance share would fall to a half (faster, both fee
 once and it is no longer a walk). The path is cut where it rests (for 1.4 s or more); each stretch
 that moves is `walkAlong` (`carry.ts`), and a rest where the next stretch goes another way is a turn.
 
-- **The pace.** The walk is taken at each time's pace (one walk for each half cm/s), so slow walking
-  takes short steps at a cadence near an ordinary one, not long steps slowly. Its phase goes by the
-  distance gone, which keeps planted feet planted.
-- **Setting off.** From standing, the foot on the side the body turns to steps first, its first
-  footfall landing still turned part of the way toward where it stood; the other foot swivels as the
-  pelvis comes round; the body is round to its way in a second. Up to 135° it turns as it sets off;
-  further round it turns on the spot first (`turnFor`, `turnFrames`, its facing from the chain) and
-  stands on for a moment while the pelvis, chest and head come round.
+- **The pace.** A step is taken as the walk at the pace the body comes to within a step's time (one walk
+  for each half cm/s): setting off or speeding up, a step is planned for the pace the body will have as it
+  lands. Slow walking takes short steps at a cadence near an ordinary one, not long steps slowly. The
+  phase goes by the distance gone, which keeps planted feet planted; but never so slowly that a foot in
+  the air takes longer than the walk's own swing time to land, so a gentle set-off takes a shorter step
+  instead of hanging over a long, slow one on one leg.
+- **Setting off.** From standing, as the start rule has it (`START_STYLE`): the walk begins at the rule's phase against where the foot that stays
+  stands (`phase`), and the foot on the side the body turns to steps first. Where the body is up to
+  pace within that step, as in a quick start, its first step is a whole step of the walk it sets off
+  into, not a slow walk's short step. That footfall lands a little wide and still turned part of the
+  way toward where it stood (`landOut`, `landTurn`). The body turns at once, at a steady rate,
+  settling at the end (`turn`). The foot that stays swivels with it (`swivel`); where the pelvis would be
+  twisted against it further than it can be (`twistMost`), it pivots on its ball with the pelvis and
+  bears the weight until the other foot is down, so long as that pivot is no more than the leg turns in
+  the hip (`HUMAN_RANGES.hip.turn`); further round, it leaves at that twist and shuffles to its first
+  footfall (`shuffle`). The trunk bows forward and the head with it, and turning, the body leans toward
+  the foot that stays (`bow`, `shift`); the pose comes into the walk's in `blend` seconds if the pace
+  is slower to, so that the body is down in the walk as its first foot lands. Up to 135° it turns as it sets off; further round it
+  turns on the spot first (`turnFor`, `turnFrames`, its facing from the chain) and stands on for a
+  moment while the pelvis, chest and head come round.
 - **Stopping.** Braking, the phase goes by time (the feet keep stepping, the steps shorten) from just
   before the pace falls, bent the smoothest way so that the body stops as the last foot to land has
   just gone flat. That foot is the stance's own place about where the body stops, and does not move
-  again. The foot behind then leaves at its own time, lifts a little and is set down beside it. If it
-  would have to come further than `closeMost` (a stop straight after a sharp bend), the body takes one
-  more, quicker and shorter step first.
+  again; braking gently, the foot before it is set down no further on than its own place in the stance
+  (the walk's lead would put it past it, and it would have to be stepped back), its step and its swing
+  shortened to it. The foot behind bears part of the weight while the body brakes: it leaves once the
+  body has stopped, lifts a little and is set down beside it (`STOP_STYLE.close`). Meanwhile the hips sway to the side,
+  toward the foot that stands, as far as the stop rule has them (`STOP_STYLE.shift` of the way to the
+  point of its sole the weight counts at). They take a stride of the walk they stopped from, the walk's
+  own sway time; quicker, the floor would have to push from outside the sole that stands. The pelvis
+  tucks and the chest comes forward over it as the stop rule has it (`STOP_STYLE.tuck`, from as the
+  stop begins). If the foot behind would have to come further than `closeMost` (a stop straight after a
+  sharp bend), the body takes one more, quicker and shorter step first.
+- **Running legs.** Running, a leg in the air keeps the body's least knee bend
+  (`HUMAN_MANNER.kneeLeast`): a trailing foot the leg cannot reach is drawn in, not snapped straight
+  behind a body that vaults on. Walking, a leg straightens as it reaches for its footfall. (A plan's
+  `airKnee` may be given by the kind of gait.)
+- **Pushing and braking.** The body answers its pace changing as it feels it (`HUMAN_MANNER.react`).
+  Running, the hips crouch into a push and the spine curls with it (`crouch`, `curl`); walking, it
+  leans into its first step as a start does (above). Braking, the trunk tilts back (`tilt`); a walk's
+  stop tucks as the stop rule has it.
 - **Bends.** The hips lean into a bend by the sideways pull (`bank`) and the footfalls are set in from
   the walk's line (`track`), as in a turning walk, so the inner foot stays within its leg's reach.
-- **A loop.** With `endHeading` the body turns on the spot to face that way after its last stop; a
-  path that ends where it began, facing as it began, gives a clip that closes on itself.
+- **Corners.** A body takes a corner over about a step: a path walked from a path file (`pathWalk.ts pathOnBody`)
+  has every drawn corner rounded, each point the mean of the path over a leg's length to either side, weighted to fade
+  toward the ends of that reach (worked out once every 5 mm along the path). Where the path is smooth on that scale, and
+  at an open path's ends, the way is the path itself. A corner where the body comes to rest (between two timing keys at
+  the same distance, `MotionPath.rests`) is not walked through: the reach shrinks to nothing there, so the body walks
+  straight into its stop along the way it came and sets off along the way it goes, turning as it sets off.
+- **A loop.** The body stands at first where the path begins, facing as `startHeading` has it (a path file: ahead,
+  its z), and sets off turning to its way. With `endHeading` it turns on the spot to face that way after its last
+  stop; a path file that is closed ends facing as it began, so its clip closes on itself.
 
-`walkOnModel` (`pathWalk.ts`) does it for a model: it measures the body from the skeleton (and the sole from the mesh), walks a `Trail` (where the capsule is, 240 times a second, as [left, ahead] metres) and writes the clip into a copy of the model's GLB. The Edelweiss Walk example holds a trail and the model as it came, and no clip: a script of the project (`WalkMaker.js`, bundled from these files by `editor/scripts/make-walk-script.mjs`) makes the walk when the project opens, and again when the model is replaced. The editor only shows the project. The way's direction is taken over at least 5 mm of it: over less, the rounding of a trail's points turns the way about.
+The way's direction is taken over at least 5 mm of it. The path walk's own values are in `ALONG_STYLE`;
+a walk's start and stop take the start and stop rules' numbers (`START_STYLE`, `STOP_STYLE`).
 
-The values are in `ALONG_STYLE`. They are set by hand and checked (below), not fitted to reference
-motions.
+**Path files.** The path is drawn, not sampled: a path file (`<name>.path.json`, a data asset, read by
+`core/motionPath.ts`) holds where the body goes and when, as two curves made the way an illustration
+program makes them.
 
-## 2. Fitting it to reference motions
+```json
+{
+  "format": "morglay-path", "version": 1, "closed": true,
+  "points": [ { "at": [0, 0], "in": [0, -1.23], "out": [0, 1.61] }, ... ],
+  "timing": { "keys": [ { "t": 0, "s": 0 }, { "t": 1, "s": 0, "out": [0.75, 0] }, ... ] }
+}
+```
 
-1. **Give each reference its inputs.** Write down its path (for a clip that moves the character, the
-   root's track; for one in place, its speed, turn rate and grade), its look, its first state and its
-   posture. Align its first frame with a phase of the walk (a per-reference value, fitted with the
-   rest). Feed these to `locomote`. Never feed it the reference's poses.
-2. **Compare curves, not frames by eye.** Sample both at the same rate and take 44 curves:
-   - the hips' place (left, fore, up);
-   - the pelvis', the chest's and the head's facing, list and lean;
-   - each foot's place, facing and pitch;
-   - each knee's bend and facing;
-   - each upper arm's out and fore angle, the elbow, and the forearm's fore angle.
+- **Where.** Anchors with an in and an out handle, a cubic Bezier between each two (and from the last
+  back to the first when closed). x is metres to the left and z metres ahead of where the body stands
+  at first, facing ahead: the editor's x and z for a character facing +z. Handles are positions, as in
+  SVG; one left out sits on its anchor (a corner).
+- **When.** Keys of `s` (metres along the path) at `t` (seconds), a cubic in (t, s) between each two, as
+  in an animation program's graph editor: a key's handles are offsets from it, `[dt, ds]`; without one
+  the line to the next key is straight. Two keys at one `s` are a rest. `s` never goes back: a file
+  whose handles would take it back, or make time run back, is refused.
+- **Reading it.** `parsePath` checks the file, measures each segment (Gauss-Legendre over 64 pieces, well
+  under a millimetre) and gives the place at a distance, the distance at a time (the time curve's own
+  parameter solved for `t`) and `sample(t)`: [left, ahead] at a time, which `locoPath` walks.
 
-   Unwrap curves that turn with the body by whole turns from the reference's first value. Align a motion
-   that ends standing at its end, not its start.
-3. **Score.** For each curve, take its rms difference divided by the reference curve's range (at least 2
-   cm or 2°). The mean over the curves is the **distance**. The fit minimizes a weighted mean square:
-   hips 2; pelvis, chest, head and feet 1; arms and elbows 0.5; knees and forearms 0.3.
-4. **Fit by coordinate descent.** Take each named value in turn and try ± a step (first 20 % of its
-   size). Keep the better one, or the lowest point of the parabola through the three. Shrink the step by
-   2.5 when neither side is better. Score a value only on the references it shows in: a turning term on
-   turning walks, a backward guard term on backward guard walks. Two or three rounds are enough.
-5. **Read the values before keeping them.** A window that starts before 0 breaks the first pose. A
-   share above 1 puts toes through the floor. A spring with a half-life of seconds means the part does
-   not move. Pin such values and refit the rest. If the fit stalls, look at the curves for a movement
-   the formula does not have yet, rather than adding knobs.
-6. **Check on the model's own bones.** Bake the frames into a clip on the model, then check:
-   - the ankles land where the formulas put them;
-   - a foot standing flat does not move between keys (0.2 mm);
-   - a standing leg reaches its ankle;
-   - no joint or sole goes under the floor, or under the step it stands on;
-   - the ankles stay at least 8 cm apart;
-   - the hips' acceleration stays within limits;
-   - no bone turns more than 12° between keys at 60 fps;
-   - a loop closes on itself.
+`walkClip` (`pathWalk.ts`) makes the walk for a model: it measures the body from the skeleton (and the
+sole from the mesh), walks the path on it with `locoPath` and puts the frames on the model's bones. A
+closed path ends facing as it began (`endHeading` 0), so its clip closes on itself.
 
-   Where the references themselves go further (a knee giving way on a lower step), take the limit from
-   them.
-7. **One formula over all.** Fit the shared values (the chain, the field) on all references at once. A
-   kind of motion may lose at most 2 points of distance against being fitted on its own.
-8. **Round.** Give each fitted value the cleanest number within 5 % of it: one significant digit, else
-   one in halves (35, 0.15, 2.5), else two digits. Then check again; where a rounding breaks a check,
-   take the next finer number for that value.
+**Clips made as a model loads.** A model's animation lists clips made for it besides its file's own
+(`AnimationDoc.sources`, `core/clipSources.ts`): a walk along a path asset, or a clip of a clip file (a
+GLB of a skeleton and clips: dropped on a model it becomes an Animation asset) retargeted onto its
+bones. The editor and Play load the model's GLB with those clips added, made in memory in a worker
+(`engine/clips.ts`) once for every object showing that model with those sources; the model's file stays
+as it is and nothing is stored. A built game ships the model's file and the sources' files and makes
+the clips the same way. Inspector > Animation lists them, takes one out and adds a walk from a path
+asset; the paths are drawn on the floor under their models in the editor. The Edelweiss Walk example
+holds her VRM as it came and one path (`assets/a_edelweisspath1-walk.path.json`: a loop of 26.2 m in
+34.4 s, three stops on the way): change the file and open the example again, and the walk is made
+again for her body.
+
+## 2. Checks
+
+A motion is baked into a clip on the model's own bones and checked there:
+
+- the ankles land where the formulas put them;
+- a foot standing flat does not move between keys (0.2 mm);
+- a standing leg reaches its ankle;
+- no joint or sole goes under the floor;
+- the ankles stay at least 8 cm apart;
+- the hips' acceleration stays within limits;
+- no bone turns more than 12° between keys at 60 fps;
+- a loop closes on itself.
+
+And what a body can do (`plausible.ts`): no joint past its range, the floor asked for no pull, for no push
+with no foot standing and for no more along it than it grips, and the push asked from within the soles
+that stand.
+
+Each value is written as the cleanest number within 5 % of what it should be: one significant digit,
+else one in halves (35, 0.15, 2.5), else two digits; where a rounding breaks a check, the next finer
+number.
 
 ## 3. What to change for which look
 
-### Facing (`LOCO_STYLE.chain`)
+Every number is one of three kinds (motionGen/manner.ts): the body's own (bones, soles, masses and joint ranges,
+measured from the model and the human tables), physics (gravity and what follows from it for the
+body), or the character's manner (ratios written once and named by every motion that uses them). The rules of starts,
+stops and turns on the spot keep their own tables: they are what a viewer watches most. A
+test counts the numbers written in the tables (`test/unit/parameters.test.ts`); a change may not add to them.
+
+### Body, physics and manner (`manner.ts`)
+
+| Look | Term | Change |
+|---|---|---|
+| Knees point more with the pelvis than with the feet | `HUMAN_MANNER.kneeFollow` 0.5 | raise |
+| A working leg keeps its knee more bent (it never locks straight; this sets how far a leg reaches) | `HUMAN_MANNER.kneeLeast` 16° | raise |
+| The neck turns more with the head | `HUMAN_MANNER.neck` 0.5 | raise |
+| The body answers a change of pace later | `HUMAN_MANNER.react` 0.08 s | raise |
+| Looks further ahead along its way | `HUMAN_MANNER.ahead` 0.2 strides | raise |
+| Takes bends harder before it leans no further | `HUMAN_MANNER.turnMost` 0.3 g | raise |
+
+### Arms
+
+A run's arms are driven (the elbows held bent and snapped, the swing across the body) by effort: fully from
+`GAIT_STYLE.armDrive` (a Froude number, 2.5) up and whenever the body speeds up or brakes to rest; slowing into a walk,
+they are let go with the pace, the run's arm terms going over to the walk's (`gait.ts armsAt`).
+
+| Look | Term | Change |
+|---|---|---|
+| A slowing run lets its arms go sooner | `GAIT_STYLE.armDrive` | raise |
+
+### Facing as it turns on the spot (`CHAIN_STYLE`, chain.ts)
 
 | Look | Term | Change |
 |---|---|---|
 | The pelvis follows the look more | `share[0]` 0.17 | raise |
 | The chest follows the look more | `share[1]` 0.15 | raise |
-| The head stops short of what it looks at | `reach` 1 | lower |
-| The body gets further round when looking back | `most` [pelvis forward 35°, pelvis backing away 55°, chest 23°, head 55°] | raise |
-| The feet open toward the look | `feet.forward` / `feet.backward` (near foot, other foot; looking left, looking right) | raise |
-| Backs away sooner when looking back | `back` 110° | lower |
+| The body gets further round | `most` [pelvis 35°, chest 23°, head 55°] | raise |
 | The head reacts faster to a new look | `time[2]` 0.18 s | lower |
 | The body settles toward the look faster | `time[0]`, `time[1]` (0.8 s, 0.6 s) | lower |
-| Looks further ahead round a bend | `ahead` 0.2 strides | raise |
 
-### Turning walk (`LOCO_STYLE.turning`, per radian the way turns in a stride)
+### Bends (`BEND_STYLE`, carry.ts)
+
+Each term is per unit of how sharply the way bends against the body's size (hip height over the bend's radius), so a
+run's wider bend at the same turn per stride asks for less. The lean is per g of the sideways pull the body feels (its
+speed times how fast its way turns), up to `HUMAN_MANNER.turnMost`.
 
 | Look | Term | Change |
 |---|---|---|
 | Leans further into the turn | `bank` (share of hip height per sideways g) | raise |
 | Feet set further in | `track` [inner, outer] | raise |
-| Feet point into the turn | `toe` [inner, outer] | raise |
-| Pelvis faces out of the turn | `face` (negative: out) | lower |
-| Chest leads into the turn | `chest` | raise |
-| Spine curls, the head with it | `curl` [degrees, the head's share] | raise |
-| Chest and head roll into the turn | `roll` | raise |
-| The outer arm swings wider | `armOut[1]`, `elbow` | raise |
 
-### Slopes (`LOCO_STYLE.climbing.up` / `.down`, for the grade `climbing.grade`; a gentler slope takes as much less)
+### Starts, stops, turns (`START_STYLE`, `STOP_STYLE`, `TURN_STYLE`)
 
 | Look | Term | Change |
 |---|---|---|
-| The body goes up to the next step sooner | `carry[0]` (steps after the foot lands; negative: before) | lower |
-| ... over a longer time | `carry[1]` | raise |
-| The toes catch the edge | `clear` [share of leg length, when] | raise the first |
-| The leg in the air reaches down straight | `airKnee` | raise |
-| Upright going up | `curl` | raise |
-| Pelvis tucked going down | `bow` (negative) | lower |
-| The head looks ahead, not down | `nod` | lower |
-| A foot lands later on a step down | `late` (share of a stride) | raise |
-| The feet go down the slope a little sideways | `toe` | change |
-
-### On guard (`LOCO_STYLE.guard.forward` / `.backward`)
-
-| Look | Term | Change |
-|---|---|---|
-| The stance turned further from what it faces | `offset` [pelvis, chest] | lower (more negative) |
-| Turning to the right differs from turning to the left | `rightShare` | change |
-| Lower, more crouched | `knee` [at the strike, through the stance], `sink` | raise |
-| Wider stance | `wide` | raise |
-| More bounce, or more surge backing away | `bob`, `surge` | raise the first number |
-| The arms hang more and swing less | `armShare` | lower |
-| A foot whips out as it leaves the floor | `swingTurn` [left, right, when] | raise |
-| Cadence | `quick` | raise for quicker steps |
-
-### Starts, stops, turns (`LOCO_STYLE.rules`)
-
-| Look | Term | Change |
-|---|---|---|
-| Gets up to speed sooner | `start.accel` | lower |
-| Turns to the way sooner | `start.turn` [length, from, to] | lower the times |
-| The staying foot swivels more before it leaves | `start.swivel` | raise |
-| Brakes later or longer | `stop.brakeAt`, `stop.brake` | change |
-| The closing step | `stop.close` [wait, length] | change |
-| Pelvis tucks as it stops | `stop.tuck` | raise |
-| Turn right about keeps more of the old walk | `pivot.from`, `pivot.drop` | change |
-| Turn on the spot: when each of the three steps goes | `turn.left.steps` / `turn.right.steps` | change |
+| Turns to the way sooner | `START_STYLE.turn` [length, from, to] | lower the times |
+| The staying foot swivels more before it leaves | `START_STYLE.swivel` | raise |
+| The stop's tuck begins sooner before it brakes | `STOP_STYLE.brakeAt` | raise |
+| The closing step takes longer | `STOP_STYLE.close` (seconds) | raise |
+| Pelvis tucks as it stops | `STOP_STYLE.tuck` | raise |
+| Turn on the spot: when each of the three steps goes (either way round) | `TURN_STYLE.side.steps` | change |
 
 ### Path walks (`ALONG_STYLE`)
 
@@ -201,28 +218,27 @@ motions.
 | Slow walking takes shorter steps | `least` 0.3 m/s (the walk's shape is taken at no less than this pace) | lower |
 | The pose is all the walk's from this pace on | `full` 1 m/s | lower |
 | The feet keep their cadence longer while braking | `ahead` 0.4 s (the phase goes by time from so long before braking) | raise |
-| The foot behind leaves later or steps longer | `close` [0.05, 0.5] s | change |
 | One more step is taken sooner before a stop | `closeMost` 0.3 m | lower |
 | The body stands up slower after a stop | `settleTime` 0.6 s | raise |
-| Turning as it sets off: how long, how much the first foot lands turned, how much the other swivels | `turnTime` 1 s, `landTurn` 0.15, `swivel` 0.2 | change |
-| Leans further into a bend, sets its feet further in | `bank` 0.35, `track` | raise |
+| Setting off and stopping from a walk: turning, the first footfall, the swivel, the sway onto the standing foot, the tuck | the start and stop rules' own terms (`START_STYLE`, `STOP_STYLE` above) | change there |
+| Leans further into a bend, sets its feet further in | `BEND_STYLE.bank`, `.track` | raise |
 
 ## 4. Lessons
 
-- **Carry what exists before writing new motion.** The start's curves are the ordinary walk after the
-  first steps. So a start is the walk's pose by phase on planned footfalls. It matched before any
-  fitting.
+- **Carry what exists before writing new motion.** A start is the ordinary walk after its first steps,
+  so it is the walk's pose by phase on planned footfalls.
 - **Under acceleration, let the phase go by distance travelled.** Under braking, fix the footfall times
   and bend the phase to them.
 - **Rules for a planted foot come on by amount, not by a gate.** An on/off condition popped a foot 16°
   in one frame.
+- **What is found from samples must not jump as the gait changes.** The run's hips stood as high as the
+  least headroom over 64 instants of its stride: as a run slowed into a walk its gait changed every frame,
+  the least moved from instant to instant, and the hips shook by millimetres a frame (33 m/s²). The least
+  is now found between its neighbours to a hair (`gait.ts leastOver`); likewise the longest step the legs
+  can take is found by halving, not by cutting it 3 % at a time.
 - **A curve that must stay between 0 and 1 is two least-jerk pieces.** The smoothest curve through an
   off-center top overshoots: a lift with its top at 76 % of a swing pushed the foot 20 cm down in
   mid-swing.
-- **A foot lands when its leg reaches.** On the way down a slope the planned landing came before the leg
-  could reach the lower step. The landing now waits.
-- **Two inputs can be the same for two motions.** Walking away while looking back, and backing away while
-  facing the same point, have the same path and look. The formula picks one; the other is a setting.
 - **A half turn is either way round.** Decide which way by a rule (behind counts as left), or by the
   leading foot.
 - **Braking is not walking slowly.** Letting the phase go by distance while braking froze the legs with
@@ -236,19 +252,13 @@ motions.
 - **Look for the minimum, not the end of the range.** Pitching a foot on its heel first brings the hip
   closer to the ankle, then further. A search that only looked at the end of each pivot's range missed
   the pitch that reaches, and put the toes straight up on a body with high ankles and a short heel.
-- **When a fit picks "never", read what it says.** The pelvis' and chest's springs went to many seconds
-  on quick turns: they do not lead the legs there. A value no reference can show (how fast the body
-  settles to a slowly moving look) is set for use, and its cost is written down.
 
 ## 5. Not yet
 
 - The path is analyzed as a whole, offline. Re-planning every frame for a live controller (a streaming
   engine) comes next.
-- Path walks (`ALONG_STYLE`) are set by hand and checked, not fitted to reference motions. A look that
-  is separate from the path (looking one way, walking another) is not yet part of them.
-- The start's lean and the stop's tuck are still constants of their rules, not terms of acceleration in
-  the field.
+- A look that is separate from the path (looking one way, walking another), a guarded walk, a slope and
+  a turn right about while walking are not made (a path file has none of them).
+- The start's lean and the stop's tuck are still constants of their rules, not terms of acceleration.
 - The turn on the spot has its own pose builder (`turn.ts`). It takes its facing from the chain but is
   not yet carried by `carry.ts`.
-- One speed and one turn rate per kind were fitted. Other speeds, turn rates and grades follow the laws
-  and the proportional terms, but no reference checked them.

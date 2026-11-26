@@ -31,26 +31,6 @@ function tracksOf(canon: Canonical, keys: number, times: Float32Array, frameAt: 
 }
 
 /**
- * The frames of a stride as a clip on the canonical skeleton. It closes on itself:
- * the last key is the first again, one `duration` later. `inPlace` takes the travel off
- * the hips (the character's own movement carries a looping clip).
- */
-export function framesToClip(canon: Canonical, body: Body, frames: GaitFrame[], duration: number, name: string, inPlace = true): Clip {
-    const keys = frames.length + 1;
-    const times = new Float32Array(keys);
-    frames.forEach((f, k) => (times[k] = f.time));
-    times[keys - 1] = duration;
-    const stride = duration * (frames.length > 1 ? (frames[1].travel - frames[0].travel) / (frames[1].time - frames[0].time) : 0);
-    const tracks = tracksOf(canon, keys, times, (k) => frames[k % frames.length], (k) => {
-        const f = frames[k % frames.length];
-        // The closing key is the first frame one stride on.
-        const travel = inPlace ? f.travel : k === frames.length ? -stride : 0;
-        return [f.hips[0] - body.fwd[0] * travel, f.hips[1] - body.fwd[1] * travel, f.hips[2] - body.fwd[2] * travel];
-    });
-    return { name, tracks };
-}
-
-/**
  * The frames of a motion that is played once (a turn on the spot) as a clip on the canonical
  * skeleton: a key a frame, the hips where the frames have them.
  */

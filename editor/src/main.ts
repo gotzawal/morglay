@@ -23,6 +23,7 @@ import { Player } from './play/player';
 import { ModelServices, savedBackend } from './play/ai/services';
 import { scriptChat } from './ai/scriptChat';
 import { formatBytes } from './core/assets';
+import { isPathAsset } from './core/motionPath';
 import { AIPanel } from './ui/aiPanel';
 import { AIStatus } from './ui/aiStatus';
 import { onChanges, touches } from './ui/batch';
@@ -34,6 +35,7 @@ import { StepsBar } from './ui/stepsBar';
 import { openVersionHistory } from './ui/versionHistory';
 import { draggedLibraryItem } from './ui/libraryDialog';
 import { NavOverlay } from './viewport/navOverlay';
+import { PathOverlay } from './viewport/pathOverlay';
 import { ShotView } from './ui/shotView';
 import { Dock } from './ui/dock';
 import { h } from './ui/dom';
@@ -257,6 +259,12 @@ async function main() {
             if (asset?.kind === 'model') editor.addModel(ref, point);
             else if (asset?.kind === 'audio') store.select(editor.addSound(ref, hitId ? [hitId] : [], hitId ? undefined : point));
             else if (asset?.kind === 'texture') editor.applyTexture(ref, hitId && store.node(hitId)?.mesh ? [hitId] : store.selection);
+            // A motion or a path: the model it was dropped on plays it (or the selected ones, or the only character).
+            else if (asset && (asset.kind === 'clip' || isPathAsset(asset))) {
+                void editor.addAnimationSource(ref, hitId ? [hitId] : store.selection).then((ids) => {
+                    if (!ids.length) toast(`Drop ${asset.name} on a model to play it.`, 'info');
+                });
+            }
         },
         onPickPart: (id, renderer) => {
             const path = renderer ? sync.modelInfo(id)?.pathOf(renderer) ?? null : null;
@@ -581,6 +589,8 @@ async function main() {
     const updateNavOverlay = () => navOverlay.setVisible(store.prefs.navMesh);
     store.on('prefs', updateNavOverlay);
     updateNavOverlay();
+    // The paths models walk (their animation's walk sources), drawn on the floor under them: an editor view aid, hidden while playing.
+    new PathOverlay(runtime, store, sync);
     // GI probe spheres are an editor view aid: hidden while playing.
     const updateProbeHelpers = () => runtime.gi.setHelpersVisible(store.prefs.giProbes && !store.playing);
     store.on('prefs', updateProbeHelpers);

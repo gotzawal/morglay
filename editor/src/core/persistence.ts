@@ -144,7 +144,8 @@ interface ProjectManifest {
 const PROJECT_FILE = 'project.json';
 
 function assetFileName(meta: AssetMeta): string {
-    const dot = meta.name.lastIndexOf('.');
+    // A path keeps its double extension (walk.path.json).
+    const dot = /\.path\.json$/i.test(meta.name) ? meta.name.length - '.path.json'.length : meta.name.lastIndexOf('.');
     const ext = dot > 0 ? meta.name.slice(dot).toLowerCase().replace(/[^.a-z0-9]/g, '') : '';
     const stem = (dot > 0 ? meta.name.slice(0, dot) : meta.name).normalize('NFKD').replace(/[^\w-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
     return `assets/${meta.id}${stem ? '-' + stem : ''}${ext}`;
@@ -211,15 +212,22 @@ export async function importProject(zip: Blob): Promise<{ doc: SceneDoc; camera?
 
 /** Stores the files a project manifest lists (read by `read`, by path) in this browser and returns the scene. */
 async function storeProject(manifest: ProjectManifest, read: (path: string) => Promise<Blob | undefined>): Promise<{ doc: SceneDoc; camera?: CameraState }> {
+    const stored = new Map<string, AssetMeta>();
     for (const f of Array.isArray(manifest.files) ? manifest.files : []) {
         const blob = f && typeof f.path === 'string' ? await read(f.path) : undefined;
         const meta = f?.meta;
         if (!blob || !meta || typeof meta.id !== 'string') continue;
         const typed = blob.type ? blob : new Blob([blob], { type: meta.mime || '' });
         const { id, name, kind, ...extra } = meta;
-        await putAsset(typed, name, kind, id, extra);
+        stored.set(id, await putAsset(typed, name, kind, id, extra));
     }
-    return { doc: sanitize(manifest.scene), camera: manifest.camera };
+    const doc = sanitize(manifest.scene);
+    // The scene knows each file as it was stored: one changed beside project.json (an example's path) has its own size and fingerprint.
+    doc.assets = doc.assets.map((a) => {
+        const s = stored.get(a.id);
+        return s ? { ...a, size: s.size, ...(s.hash ? { hash: s.hash } : {}) } : a;
+    });
+    return { doc, camera: manifest.camera };
 }
 
 /**

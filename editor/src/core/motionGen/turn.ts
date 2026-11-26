@@ -9,8 +9,8 @@
 //   the plan      turnFor      angle ─► three footfalls: which foot, when, from where to where
 //   the feet      footAt       a planted foot does not move; one in the air goes the smoothest
 //                              way to its next place, its heel lifted and its toes near the floor
-//   the facing    facingAt     pelvis, chest and head each turn as a sum of least-jerk moves that
-//                              overlap: a glance, the turn itself, and what swung past taken back
+//   the facing    chain.ts     pelvis, chest and head follow the look over the line the feet have
+//                              turned, each by its spring (the chain the walk turns by)
 //   the hips      hipsAt       over the feet, each counted by the weight on it (a foot in the
 //                              air still counts a little: the body is on its way to it)
 //   the rest      turnFrames   legs by two-bone IK, the spine from the pelvis' turn to the
@@ -22,14 +22,15 @@
 // so a turn to the left and one to the right each have their own. A planted foot stays where
 // it is: sliding cannot happen.
 //
-// The formulas, how their values were fitted and which to change for which look: editor/MOTION.md.
+// The formulas and which value to change for which look: editor/MOTION.md.
 
 import { add, dot, qinv, qmul, rotate, scale, sub, type Quat, type V3 } from '../rigMotion';
 import type { Body } from './body';
 import type { GaitFrame } from './gait';
-import { chainFollow, chainOf, type ChainStyle } from './chain';
+import { CHAIN_STYLE, chainFollow, chainOf, type ChainStyle } from './chain';
 import { armBones, footTurn, legPose } from './limbs';
 import { axisAngle, clamp, DEG, minJerk, slerp } from './tools';
+import { HUMAN_MANNER } from './manner';
 
 /** Where a foot stands under the body. */
 export interface FootStand {
@@ -78,12 +79,6 @@ export interface TurnSide {
         /** How far it turns: degrees, and share of the angle. */
         turn: [number, number];
     };
-    /** The share of the angle the pelvis, the chest and the head turn at once, with the first look. */
-    glance: [number, number, number];
-    /** When the turn itself is over for each of them, seconds. */
-    arrive: [number, number, number];
-    /** How far each swings past, share of the angle; the last step takes it back. */
-    over: [number, number, number];
     /** How much of its weight each step takes off its foot's side (0: the hips stay between the feet; 1: they go right over the standing foot). */
     shift: [number, number, number];
     /** The trunk bows forward twice, as the turn starts and as it gathers to stop: each [from, to (seconds), degrees, degrees per radian]. */
@@ -100,16 +95,16 @@ export interface TurnStyle {
     stance: Stance;
     /** How long a turn takes, whatever its angle, seconds. */
     seconds: number;
-    left: TurnSide;
-    right: TurnSide;
-    /** How long the first look takes, seconds. */
-    glanceTime: number;
+    /**
+     * How a turn goes, to either side alike: a body is the same to both sides, so a turn to the right is the turn to the
+     * left in a mirror (which foot is the near one and which way round it goes follow the side; the stance's own
+     * difference between the feet is all that makes the two differ).
+     */
+    side: TurnSide;
     /** How high the ankle of a stepping foot goes, share of leg length. */
     lift: number;
     /** The foot that swings round rises with the square of how far it goes: share of leg length per (distance / leg length)². */
     swingLift: number;
-    /** How much of a foot's rise is its heel lifting with its toes left near the floor (1: all). */
-    heel: number;
     /** The foot that swings round goes wide of the straight line, away from the standing foot: share of its distance at a half turn. */
     bow: number;
     /** The hips ride highest over one foot and lowest between two: the whole range (share of hip height), and the share of it that is below standing. */
@@ -144,10 +139,8 @@ export interface TurnStyle {
     elbow: [number, number];
 }
 
-/**
- * The default values, fitted to reference motions (editor/MOTION.md): the stance, and the
- * turns to the left and to the right.
- */
+/** The default values: the stance, and the turn (to the left and to the right alike). */
+
 export const TURN_STYLE: TurnStyle = {
     stance: {
         feet: [{ side: 0.125, fore: -0.021, out: 0.6 }, { side: 0.12, fore: -0.065, out: 5.5 }],
@@ -158,36 +151,18 @@ export const TURN_STYLE: TurnStyle = {
         arms: [{ out: 18, fore: -6, elbow: 13 }, { out: 16, fore: -11, elbow: 17 }],
     },
     seconds: 2.5,
-    left: {
-        steps: [[0.11, 0.6], [0.55, 1.3], [1.3, 2.1]],
-        swivel: 0.4,
-        first: { round: [-0.25, 0.4], reach: [0.9, -0.035], turn: [2, 0.55] },
-        glance: [0.1, 0.15, 0.4],
-        arrive: [1.8, 1.9, 1.4],
-        over: [0.09, 0.15, 0.004],
-        shift: [0.3, 0.6, 0.55],
-        nod: [[0, 0.75, 3, 2], [0.55, 2.2, 3.5, 1.8]],
-        headNod: 0.02,
-        headAxis: 6.5,
-        hike: 2,
+    side: {
+        steps: [[0.042, 0.64], [0.54, 1.3], [1.26, 2.2]],
+        swivel: 0.57,
+        first: { round: [6, 0.45], reach: [0.9, 0.08], turn: [-0.6, 0.5] },
+        shift: [0.36, 0.64, 0.65],
+        nod: [[0, 0.8, 2.5, 1.4], [0.8, 2.2, 0.9, 1.6]],
+        headNod: 0.13,
+        headAxis: 3,
+        hike: 2.1,
     },
-    right: {
-        steps: [[0.09, 0.6], [0.55, 1.3], [1.3, 2]],
-        swivel: 0.7,
-        first: { round: [5, 0.5], reach: [1, 0.23], turn: [1.2, 0.45] },
-        glance: [0.13, 0.14, 0.42],
-        arrive: [1.9, 1.9, 1.7],
-        over: [-0.022, 0, -0.022],
-        shift: [0.5, 0.6, 0.7],
-        nod: [[0, 0.7, 3, 0.65], [1, 2, 0, 1.6]],
-        headNod: 0.9,
-        headAxis: 6.5,
-        hike: 2.2,
-    },
-    glanceTime: 0.35,
     lift: 0.023,
     swingLift: 0.8,
-    heel: 1,
     bow: 0.07,
     bob: [0.006, 0.35],
     bobAt: [0.45, 0.65, 0.55],
@@ -195,8 +170,8 @@ export const TURN_STYLE: TurnStyle = {
     shiftEarly: 0.11,
     counter: 0.7,
     pelvisNod: 0.5,
-    kneeFollow: 0.45,
-    neck: 0.5,
+    kneeFollow: HUMAN_MANNER.kneeFollow,
+    neck: HUMAN_MANNER.neck,
     armSwing: [4, 2.9],
     armBack: 0.065,
     armLate: [[-0.25, 0.27], [0.1, 0.4]],
@@ -287,7 +262,7 @@ export const turnedAbout = (body: Body, s: Stand, pivot: V3, angle: number): Sta
  */
 export function turnFor(body: Body, angle: number, style: TurnStyle = TURN_STYLE, toLeft: boolean = angle >= 0): Turn {
     const { up, fwd, left } = body;
-    const side = toLeft ? style.left : style.right;
+    const side = style.side;
     const sign = toLeft ? 1 : -1, size = Math.abs(angle);
     const pivot: V3 = add(sub(body.ref.hips, scale(up, dot(body.ref.hips, up))), scale(up, body.floor));
     const start = stanceFeet(body, style.stance, pivot);
@@ -357,14 +332,6 @@ function footAt(body: Body, steps: Footfall[], start: [Stand, Stand], foot: numb
     return { ...stand, rise: 0, standing: true };
 }
 
-/** How far a part (0 the pelvis, 1 the chest, 2 the head) has turned at a time, as a share of the angle: a glance, the turn itself, and what swung past taken back with the last step. */
-function facingAt(turn: Turn, style: TurnStyle, part: number, t: number): number {
-    if (!turn.steps.length) return 0;
-    const s = turn.side, last = turn.steps[turn.steps.length - 1];
-    const glance = s.glance[part], over = s.over[part];
-    return glance * minJerk(t / style.glanceTime) + (1 + over - glance) * minJerk(t / s.arrive[part]) - over * minJerk((t - last.lift) / (last.land - last.lift));
-}
-
 /** How far the trunk bows forward at a time, radians over its stance. */
 function nodAt(turn: Turn, t: number): number {
     const size = Math.abs(turn.angle);
@@ -376,7 +343,7 @@ function nodAt(turn: Turn, t: number): number {
  * The frames of a planned turn, `fps` a second, from the stance to the stance turned (both
  * ends included). The hips really turn and shift: nothing is taken off for a root to carry.
  */
-export function turnFrames(body: Body, turn: Turn, style: TurnStyle = TURN_STYLE, fps = 60, chain?: ChainStyle): GaitFrame[] {
+export function turnFrames(body: Body, turn: Turn, style: TurnStyle = TURN_STYLE, fps = 60, chain: ChainStyle = CHAIN_STYLE): GaitFrame[] {
     const { left, up, fwd } = body;
     const stance = style.stance;
     const count = Math.max(1, Math.round(turn.seconds * fps));
@@ -393,16 +360,15 @@ export function turnFrames(body: Body, turn: Turn, style: TurnStyle = TURN_STYLE
     const headOnChest = qmul(qinv(held(body, stance.facing[1] * DEG, stance.lean[1] * DEG, 0)), held(body, stance.facing[2] * DEG, stance.lean[2] * DEG, 0));
     const standingHeight = body.floor + body.hipHeight * (1 - stance.drop) + dot(sub(body.ref.hips, body.ref.leftUpperLeg), up);
 
-    // With a chain: the line is how far the feet have turned, and the body follows the look (where the turn ends) over it.
+    // The line is how far the feet have turned, and the body follows the look (where the turn ends) over it by the chain.
     const lineAt = (t: number) => { const f = [0, 1].map((i) => footAt(body, turn.steps, turn.start, i, t)); return (f[0].heading - turn.start[0].heading + f[1].heading - turn.start[1].heading) / 2; };
-    const follow = chain ? chainFollow(chain, (t) => chainOf(chain, turn.angle - lineAt(t), { pelvis: 0, chest: 0, toes: [0, 0] }, false), turn.seconds) : null;
+    const follow = chainFollow(chain, (t) => chainOf(chain, turn.angle - lineAt(t)), turn.seconds);
     const frames: GaitFrame[] = [];
     for (let k = 0; k <= count; k++) {
         const t = (k * turn.seconds) / count;
         const feet = [0, 1].map((i) => footAt(body, turn.steps, turn.start, i, t));
-        const chained = follow ? follow(t) : null;
-        const line = chained ? lineAt(t) : 0;
-        const facing = [0, 1].map((p) => stance.facing[p] * DEG + (chained ? line + chained.pelvis + (p ? chained.chest : 0) : turn.angle * facingAt(turn, style, p, t)));
+        const chained = follow(t), line = lineAt(t);
+        const facing = [0, 1].map((p) => stance.facing[p] * DEG + line + chained.pelvis + (p ? chained.chest : 0));
         const nod = nodAt(turn, t);
         // The hip of the foot in the air is lifted.
         const hike = turn.steps.reduce((sum, s) => sum + SIDE[s.foot] * hump((t - s.lift) / (s.land - s.lift)), 0) * turn.side.hike * DEG;
@@ -410,7 +376,7 @@ export function turnFrames(body: Body, turn: Turn, style: TurnStyle = TURN_STYLE
         const chest = held(body, facing[1], stance.lean[1] * DEG + nod, 0);
         // The head is carried by the chest and turns on it about an axis that leans forward: turned far, it tilts.
         // Of the trunk's bow it takes its share, and gives the rest back about its own side axis.
-        const lead = chained ? chained.head : turn.angle * (facingAt(turn, style, 2, t) - facingAt(turn, style, 1, t));
+        const lead = chained.head;
         const axis = add(scale(up, Math.cos(turn.side.headAxis * DEG)), scale(fwd, Math.sin(turn.side.headAxis * DEG)));
         const head = qmul(chest, qmul(axisAngle(axis, lead), qmul(headOnChest, axisAngle(left, -(1 - turn.side.headNod) * nod))));
 
@@ -439,7 +405,7 @@ export function turnFrames(body: Body, turn: Turn, style: TurnStyle = TURN_STYLE
             // The knee points between where the foot points and where the pelvis faces.
             const leg = legPose(body, socket, want, along(body, f.heading + style.kneeFollow * (facing[0] - f.heading)));
             // The heel lifts and the toes stay near the floor: the foot pitched as if it stood on its tip.
-            const pitch = -style.heel * Math.asin(clamp(f.rise / body.sole.tip, 0, 1));
+            const pitch = -Math.asin(clamp(f.rise / body.sole.tip, 0, 1));
             world[`${LEG[i]}UpperLeg`] = leg.upper;
             world[`${LEG[i]}LowerLeg`] = leg.lower;
             world[`${LEG[i]}Foot`] = footTurn(body, i, f.heading, pitch);

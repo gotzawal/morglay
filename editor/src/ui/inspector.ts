@@ -3,7 +3,7 @@ import { PARTICLE_PRESETS, particleCount, presetParticles } from '../core/partic
 import { defaultCharacter, defaultPlayer } from '../core/character';
 import {
     Anime, Animation, ANIMATION_MODES, AudioSource, Body, Camera, Character, CharacterInfo, Grass, Instancing, Light, LightShadow, Material, Mirror, Motion, Particles, Player, Rain, Scatter, ScatterSource, Terrain,
-    TerrainLayer, Tree, type CharacterInfoDoc,
+    TerrainLayer, Tree, withoutClipSource, type CharacterInfoDoc,
 } from '../core/model';
 import { infoFromMeta } from '../core/mglEditor';
 import { ANIME_MAP_ROLES, compactAnime, guessAnimeKind, resolveAnime, type AnimeInput, type AnimeMapKey } from '../core/anime';
@@ -24,6 +24,7 @@ import type {
     SlotShading, TextureRole, TreeDoc, Vec3,
 } from '../core/types';
 import { MATERIAL_PRESETS } from '../core/materialPresets';
+import { isPathAsset } from '../core/motionPath';
 import { MAP_ROLES } from '../core/refs';
 import { openTextureOptions } from './textureOptions';
 import { slotShading, type ModelInfo, type ModelPart, type ModelSlot } from '../engine/modelParts';
@@ -288,6 +289,8 @@ export class InspectorPanel {
             n.tree ? 'tree' : '-',
             n.prefab ? this.prefabKey(n.prefab) : '-',
             n.model ? n.model.asset + ':' + (this.editor.sync.modelState(n.id)?.status ?? '') + ':' + (info ? info.parts.length : 0) : '-',
+            // The Animation section lists the clips and their sources, and what was made of them.
+            n.model ? (info?.clips.join('|') ?? '') + JSON.stringify(n.animation?.sources ?? []) + JSON.stringify(this.editor.sync.clipsOf(n.id) ?? '') : '',
             n.model ? JSON.stringify(Object.keys(n.model.materials ?? {})) + JSON.stringify(Object.keys(n.model.parts ?? {})) : '',
             n.model
                 ? Object.values(n.model.materials ?? {})
@@ -1548,7 +1551,7 @@ export class InspectorPanel {
         });
         if (overrides) rows.push(row('Overrides', h('div', { class: 'readonly', text: `${overrides} changed ${overrides === 1 ? 'item' : 'items'}` })));
         const out = [section('model', 'Model', 'model', rows, [menu])];
-        if (info?.clips.length) out.push(this.animationSection(node, info.clips));
+        if (info?.clips.length || info?.skeleton || node.animation?.sources.length) out.push(this.animationSection(node, info?.clips ?? []));
         if (info?.skeleton) out.push(this.motionSection(node), this.characterFileSection(node));
         if (info) {
             out.push(this.materialSlotsSection(node, info));
@@ -1595,7 +1598,7 @@ export class InspectorPanel {
         );
     }
 
-    /** The clip the model plays, and on a character the clip of each mode. */
+    /** The clip the model plays, on a character the clip of each mode, and the clips made for it (its sources). */
     private animationSection(node: NodeDoc, clips: string[]): HTMLElement {
         const same: Filter = (n) => n.model?.asset === node.model!.asset;
         const clipRow = (key: 'clip' | (typeof ANIMATION_MODES)[number], empty: string) => {
@@ -1608,7 +1611,7 @@ export class InspectorPanel {
         let character = false;
         for (let n: NodeDoc | undefined = node; n && !character; n = this.store.node(n.parent)) character = !!n.character;
         return section('animation', 'Animation', 'play', [
-            clipRow('clip', `First (${clips[0]})`),
+            clipRow('clip', clips.length ? `First (${clips[0]})` : 'First'),
             ...this.componentRows('animation', ['speed', 'fade', 'preview'], same),
             ...(character
                 ? [
@@ -1616,7 +1619,43 @@ export class InspectorPanel {
                       ...ANIMATION_MODES.map((m) => clipRow(m, `Auto (${clipFor(clips, defaults(Animation), m) ?? 'keeps the clip'})`)),
                   ]
                 : []),
+            ...this.clipSourceRows(node, same),
         ]);
+    }
+
+    /**
+     * The clips made for the model as it loads (AnimationDoc.sources, core/clipSources.ts):
+     * a walk along a path asset, a clip of a motion file. Each can be taken out; a walk is
+     * added from a path asset of the project.
+     */
+    private clipSourceRows(node: NodeDoc, same: Filter): HTMLElement[] {
+        const sources = node.animation?.sources ?? [];
+        const assets = this.store.doc.assets;
+        const nameOf = (id: string | undefined) => assets.find((a) => a.id === id)?.name ?? 'a missing file';
+        // Taken out by name on every object showing the model; the clip and the modes playing it go back to their defaults.
+        const remove = this.hooks<string>('Remove Animation Clip', same, (n, name) => {
+            const src = n.animation?.sources.find((x) => x.name === name);
+            if (n.animation && src) n.animation = Animation.parse(withoutClipSource(n.animation, src));
+        });
+        const made = this.editor.sync.clipsOf(node.id);
+        const rows: HTMLElement[] = [
+            h('div', { class: 'muted small pad', text: sources.length ? 'Clips made for this body as it loads (its file stays as it is):' : 'Clips can be made for this body as it loads: a walk along a path, or a motion file dropped on it.' }),
+        ];
+        for (const src of sources) {
+            const from = src.walk ? `Walks ${nameOf(src.walk)}` : `${nameOf(src.clip)}${src.take ? ` › ${src.take}` : ''}`;
+            const out = iconButton('trash', `Take out ${src.name}`, () => remove.commit!(src.name));
+            rows.push(row(src.name, h('div', { class: 'inline grow' }, h('div', { class: 'readonly', text: from, title: from }), out), src.walk ? 'A walk along this path, made for the model\'s body' : 'This clip of the motion file, retargeted onto the model\'s bones'));
+        }
+        if (made?.status === 'making') rows.push(h('div', { class: 'muted small pad', text: 'Making the clips...' }));
+        for (const problem of made?.problems ?? []) rows.push(h('div', { class: 'small pad error-text', text: problem }));
+        const paths = assets.filter((a) => isPathAsset(a));
+        const pick = new SelectField<string>([{ value: '', label: paths.length ? 'Choose a path...' : 'No path in the project' }, ...paths.map((a) => ({ value: a.id, label: a.name }))], '', (v) => {
+            pick.set('');
+            if (v) void this.editor.addAnimationSource(v, this.sameModel());
+        });
+        pick.el.disabled = !paths.length;
+        rows.push(row('Add Walk', pick.el, 'A walk along a path asset (a .path.json file: where the body goes and when), made for this body. Import one with the Assets panel.'));
+        return rows;
     }
 
     /**

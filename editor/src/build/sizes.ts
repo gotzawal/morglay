@@ -27,6 +27,8 @@ export interface AssetSize {
 export async function assetSizes(doc: SceneDoc): Promise<AssetSize[]> {
     const used = usedAssetIds(doc);
     const roles = assetRoles(doc);
+    // Models whose animation makes clips from sources ship as their files (build.ts).
+    const withClips = new Set(doc.nodes.filter((n) => n.model && n.animation?.sources.length).map((n) => n.model!.asset));
     const out: AssetSize[] = [];
     for (const a of doc.assets) {
         if (!used.has(a.id)) continue;
@@ -53,7 +55,7 @@ export async function assetSizes(doc: SceneDoc): Promise<AssetSize[]> {
             }
             row.shipped = bytes + (covered ? 0 : file);
             row.how = pending ? 'pending' : bytes ? 'copy' : 'file';
-        } else if (a.kind === 'model') {
+        } else if (a.kind === 'model' && !withClips.has(a.id)) {
             const opts = derivedOptions('model', a.compress);
             if (!opts) continue;
             const rec = await getDerived(derivedKey(a.id, 'model'));

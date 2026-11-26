@@ -1,7 +1,8 @@
-// A motion dropped onto a model: the clips of a clip GLB (a skeleton and its
+// A motion put onto a model: the clips of a clip GLB (a skeleton and its
 // animations, no meshes: Mixamo "Without Skin" converted from FBX to GLB, a
-// game's clip, an earlier export) retargeted onto the model's bones and
-// written into a copy of the model's GLB, next to the clips it already has.
+// game's clip, an earlier export) retargeted onto the model's bones, and
+// GLBs with clips added (the model the editor shows with its animation's
+// clips, core/clipSources.ts; a converted PMX with the motions dropped with it).
 
 import { humanoidPairs, mmdFromBiped, readGlbClips, retargetClip, retargetHumanoid, type Clip, type Helper } from './retarget';
 
@@ -14,42 +15,30 @@ export interface ClipsOntoModel {
     report: string[];
 }
 
+/** A GLB's skeleton and clips, as readGlbClips reads them. */
+export type GlbClips = NonNullable<ReturnType<typeof readGlbClips>>;
+
 /**
- * Retargets every clip of `clipGlb` onto the skeleton of `modelGlb` and adds them to it, by
+ * Clips of `src` (all of them, or those given) retargeted onto the skeleton of `model`, by
  * the method in retarget.ts: humanoid roles, one reference posture, turns from it, the hips'
  * move scaled, and the model's own clips for still joints and helper bones. A Biped clip on
- * an MMD model goes by the MMD table instead (its D and twist bones). Throws when the two
- * have too few bones in common.
+ * an MMD model goes by the MMD table instead (its D and twist bones). The clips keep their
+ * names. Throws when the two have too few bones in common.
  */
-export function addClipsToModel(modelGlb: ArrayBuffer, clipGlb: ArrayBuffer, fallbackName = 'clip'): ClipsOntoModel {
-    const model = readGlbClips(modelGlb);
-    const src = readGlbClips(clipGlb);
-    if (!model) throw new Error('the model is not a GLB');
-    if (!src || !src.clips.length) throw new Error('the motion file has no animation');
+export function retargetClips(model: GlbClips, src: GlbClips, clips: Clip[] = src.clips): { clips: Clip[]; report: string[] } {
     const mmd = mmdFromBiped(model.skeleton, src.skeleton);
     const human = humanoidPairs(model.skeleton, src.skeleton);
     const byTable = mmd.pairs.length > human.pairs.length;
     const count = byTable ? mmd.pairs.length : human.pairs.length;
     if (count < 6) throw new Error(`the motion and the model share only ${count} humanoid bones`);
-    const taken = new Set(model.clips.map((c) => c.name));
-    const names: string[] = [];
     let held: string[] = [];
     let helpers: Helper[] = [];
-    const clips: Clip[] = src.clips.map((clip, i) => {
-        let out: Clip;
-        if (byTable) out = retargetClip(src.skeleton, clip, model.skeleton, mmd.pairs, { root: mmd.root, legs: mmd.legs });
-        else {
-            const r = retargetHumanoid(model, src.skeleton, clip, human);
-            out = r.clip;
-            held = r.held;
-            helpers = r.helpers;
-        }
-        const base = clip.name || (src.clips.length > 1 ? `${fallbackName}_${i}` : fallbackName);
-        let name = base;
-        for (let k = 2; taken.has(name); k++) name = `${base} (${k})`;
-        taken.add(name);
-        names.push(name);
-        return { ...out, name };
+    const out: Clip[] = clips.map((clip) => {
+        if (byTable) return { ...retargetClip(src.skeleton, clip, model.skeleton, mmd.pairs, { root: mmd.root, legs: mmd.legs }), name: clip.name };
+        const r = retargetHumanoid(model, src.skeleton, clip, human);
+        held = r.held;
+        helpers = r.helpers;
+        return { ...r.clip, name: clip.name };
     });
     const unmatched = byTable ? mmd.unmatched : human.unmatched;
     const kinds = (k: Helper['kind']) => helpers.filter((h) => h.kind === k).map((h) => h.name);
@@ -61,7 +50,31 @@ export function addClipsToModel(modelGlb: ArrayBuffer, clipGlb: ArrayBuffer, fal
         ...(kinds('fitted').length ? [`helper bones fitted to the model's clips: ${kinds('fitted').join(', ')}`] : []),
         ...((byTable ? mmd.root : human.root) ? [] : ['no hips on one side: the clip does not move the body']),
     ];
-    return { glb: appendAnimations(new Uint8Array(modelGlb), clips), names, report };
+    return { clips: out, report };
+}
+
+/**
+ * Retargets every clip of `clipGlb` onto the skeleton of `modelGlb` (retargetClips) and adds
+ * them to a copy of it, their names made unique against the model's own. Throws when the
+ * motion has no clips or the two have too few bones in common.
+ */
+export function addClipsToModel(modelGlb: ArrayBuffer, clipGlb: ArrayBuffer, fallbackName = 'clip'): ClipsOntoModel {
+    const model = readGlbClips(modelGlb);
+    const src = readGlbClips(clipGlb);
+    if (!model) throw new Error('the model is not a GLB');
+    if (!src || !src.clips.length) throw new Error('the motion file has no animation');
+    const made = retargetClips(model, src);
+    const taken = new Set(model.clips.map((c) => c.name));
+    const names: string[] = [];
+    const clips = made.clips.map((clip, i) => {
+        const base = clip.name || (src.clips.length > 1 ? `${fallbackName}_${i}` : fallbackName);
+        let name = base;
+        for (let k = 2; taken.has(name); k++) name = `${base} (${k})`;
+        taken.add(name);
+        names.push(name);
+        return { ...clip, name };
+    });
+    return { glb: appendAnimations(new Uint8Array(modelGlb), clips), names, report: made.report };
 }
 
 /** A GLB with animations added: their data after the binary chunk's, as float accessors. */

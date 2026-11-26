@@ -6,9 +6,10 @@ import {
 } from '@orillusion/core';
 import { Emitter } from '../core/events';
 import { getAssetUrl } from '../core/assets';
+import { sourceAssetIds, sourcesKey } from '../core/clipSources';
 import type { ChangeHint, Store } from '../core/store';
 import type {
-    AnimationDoc, AssetMeta, EnvironmentDoc, GeometryDoc, GrassDoc, RainDoc, InstancingDoc, LightDoc, LightType, MaterialDoc, MeshDoc, ModelDoc, MotionDoc, NodeDoc, ParticlesDoc, ScatterDoc, TerrainDoc,
+    AnimationDoc, AssetMeta, ClipSourceDoc, EnvironmentDoc, GeometryDoc, GrassDoc, RainDoc, InstancingDoc, LightDoc, LightType, MaterialDoc, MeshDoc, ModelDoc, MotionDoc, NodeDoc, ParticlesDoc, ScatterDoc, TerrainDoc,
     TextureRole, TreeDoc,
 } from '../core/types';
 import { decompose, type Vec3 } from '../core/math';
@@ -44,6 +45,7 @@ import { ANIME_MAPS, animeMapAssets, animeOutlined, applyAnime, createAnimeMater
 import { resolveAnime } from '../core/anime';
 import { cloneMaterial, inspectModel, ModelInfo, ModelOverrides } from './modelParts';
 import { CharacterMotion } from './characterMotion';
+import { makeClips } from './clips';
 import { AnimeHeadFrame, findHeadJoint } from './animeHead';
 import type { Runtime } from './runtime';
 import { applyProps, type ShaderManager } from './shaders';
@@ -69,6 +71,26 @@ interface ModelState {
     group: string;
     /** Lets go of the group's copy it was made from. */
     release?: () => void;
+    /**
+     * The clips its animation's sources make (core/clipSources.ts), by their key: those it shows
+     * ('' for the file as it is), and those it is to show once made.
+     */
+    clips: string;
+    wantClips: string;
+    /** What it showed before, kept in view until this is ready (the file while its clips are made). */
+    previous?: ModelState;
+}
+
+/** A model with the clips of its animation's sources, made in memory once for every object showing it. */
+interface ClipModel {
+    status: 'making' | 'ready' | 'failed';
+    /** Settles once the clips are made (or could not be) and the objects waiting for them show them. */
+    done: Promise<void>;
+    /** The GLB with the clips, as a URL the loader reads; empty when no source made a clip. */
+    url: string;
+    clips: string[];
+    /** What could not be made, a line each. */
+    problems: string[];
 }
 
 /** Engine-side state of one document node. */
@@ -204,6 +226,15 @@ const LIGHT_CLASSES: Record<LightType, new () => LightBase> = {
 
 let loadToken = 0;
 
+/** The bytes of an asset's file: from this browser's store in the editor, from the game's files in a built game. */
+async function assetBytes(meta: AssetMeta): Promise<ArrayBuffer> {
+    const url = await getAssetUrl(meta);
+    if (!url) throw new Error(`"${meta.name}" is not stored in this browser.`);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`"${meta.name}" could not be read (${res.status}).`);
+    return res.arrayBuffer();
+}
+
 /**
  * Where compressed copies of assets come from (derive/ in the editor, the
  * game's files in a built game): the copy of a texture for a role, that a
@@ -245,6 +276,8 @@ export class SceneSync extends Emitter<SyncEvents> {
     private weatherRain: RainVolume | null = null;
     private owner = new WeakMap<Object3D, string>();
     private prefabs = new Map<string, Promise<Object3D>>();
+    /** Models with the clips of their animations' sources, by the sources' key (core/clipSources.ts sourcesKey). */
+    private clipModels = new Map<string, ClipModel>();
     /** Texture assets by `${asset}|${role}`: the texture, once it has data. */
     private textures = new Map<string, Promise<Texture | null>>();
     /**
@@ -606,6 +639,8 @@ export class SceneSync extends Emitter<SyncEvents> {
      */
     reloadAsset(id: string) {
         this.prefabs.delete(id);
+        // Clips made from it are made again.
+        for (const key of Array.from(this.clipModels.keys())) if (key.includes(`"${id}:`)) this.dropClipModel(key);
         this.scatterModels.delete(id);
         // Its shapes go once the scatters drawing them are placed anew with the new model.
         this.scatterModelsLoaded.get(id)?.dispose((res) => this.disposeLater(res));
@@ -617,7 +652,7 @@ export class SceneSync extends Emitter<SyncEvents> {
         for (const entry of Array.from(this.entries.values())) {
             const node = this.store.node(entry.id);
             if (!node) continue;
-            if (entry.model && (entry.model.asset === id || JSON.stringify(node.model?.materials ?? {}).includes(id))) {
+            if (entry.model && (entry.model.asset === id || entry.model.wantClips.includes(`"${id}:`) || JSON.stringify(node.model?.materials ?? {}).includes(id))) {
                 this.dropModel(entry);
                 entry.model = null;
             }
@@ -734,10 +769,10 @@ export class SceneSync extends Emitter<SyncEvents> {
         if (entry.geometry) this.geometriesChanged = true;
         if (entry.material) this.releaseMaterial(entry.material);
         entry.material = null;
-        if (entry.model) {
-            entry.model.token = -1;
-            entry.model.overrides?.dispose();
-            entry.model.release?.();
+        for (let m = entry.model; m; m = m.previous ?? null) {
+            m.token = -1;
+            m.overrides?.dispose();
+            m.release?.();
         }
         if (entry.group) this.dirtyGroups.add(entry.group);
         if (entry.instancer) this.dirtyGroups.add(entry.id);
@@ -762,7 +797,7 @@ export class SceneSync extends Emitter<SyncEvents> {
         this.applyTransform(entry, node);
         this.applyMesh(entry, node.mesh);
         this.applyLight(entry, node.light);
-        this.applyModel(entry, node.model);
+        this.applyModel(entry, node.model, node.animation);
         this.applyAnimation(entry, node.animation);
         this.applyMotion(entry, node.motion);
         this.applyParticles(entry, node.particles);
@@ -1090,7 +1125,7 @@ export class SceneSync extends Emitter<SyncEvents> {
         }
     }
 
-    private applyModel(entry: Entry, model: ModelDoc | undefined) {
+    private applyModel(entry: Entry, model: ModelDoc | undefined, animation?: AnimationDoc) {
         if (!model) {
             if (entry.model) {
                 this.dropModel(entry);
@@ -1100,17 +1135,33 @@ export class SceneSync extends Emitter<SyncEvents> {
         }
         // In an instancing group it shows the group's copy of the file's materials.
         const group = entry.group;
-        if (entry.model && entry.model.asset === model.asset && entry.model.group === group) {
-            this.applyModelOverrides(entry, model);
-            return;
+        // The clips of its animation's sources, made once for every object showing them (not in an instancing group, whose copies share the file).
+        const want = group ? '' : sourcesKey(model.asset, animation?.sources, this.store.doc.assets);
+        const made = want ? this.clipModel(want, model.asset, animation!.sources) : null;
+        const show = made?.status === 'ready' && made.url ? want : '';
+        const current = entry.model;
+        if (current && current.asset === model.asset && current.group === group) {
+            current.wantClips = want;
+            // It keeps what it shows while the clips it is to show are made.
+            if (made?.status === 'making' || current.clips === show) {
+                this.applyModelOverrides(entry, model);
+                return;
+            }
         }
-        if (entry.model) this.dropModel(entry);
+        // The same file with other clips: what it shows stays in view until the new one is ready.
+        const previous = current && current.asset === model.asset && current.group === group && current.status === 'ready' ? current : null;
+        if (current && !previous) this.dropModel(entry);
         const token = ++loadToken;
-        const state: ModelState = { asset: model.asset, token, obj: null, status: 'loading', info: null, overrides: null, key: '', group };
+        const state: ModelState = { asset: model.asset, token, obj: null, status: 'loading', info: null, overrides: null, key: '', group, clips: show, wantClips: want, ...(previous ? { previous } : {}) };
         entry.model = state;
-        (group ? this.loadGroupPrefab(model.asset, group, state) : this.loadPrefab(model.asset))
+        (group ? this.loadGroupPrefab(model.asset, group, state) : this.loadPrefab(model.asset, show))
             .then((prefab) => {
                 if (state.token !== token || this.entries.get(entry.id) !== entry) return;
+                if (state.previous) {
+                    this.dropState(entry, state.previous);
+                    state.previous = undefined;
+                    this.sweepClipModels();
+                }
                 const instance = prefab.clone();
                 instance.name = prefab.name || 'model';
                 entry.obj.addChild(instance);
@@ -1149,11 +1200,119 @@ export class SceneSync extends Emitter<SyncEvents> {
             })
             .catch((err) => {
                 if (state.token !== token) return;
+                console.error('[editor] model load failed', err);
+                // The file with clips that does not load: its clips count as failed, and the object shows what it showed, or the file.
+                const failed = state.clips ? this.clipModels.get(state.clips) : undefined;
+                if (failed && entry.model === state) {
+                    failed.status = 'failed';
+                    failed.problems = [...failed.problems, `the model with its clips did not load: ${err?.message || err}`];
+                    const previous = state.previous;
+                    state.previous = undefined;
+                    this.dropState(entry, state);
+                    entry.model = previous ?? null;
+                    const node = this.store.node(entry.id);
+                    if (previous) previous.wantClips = state.wantClips;
+                    else if (node?.model) this.applyModel(entry, node.model, node.animation);
+                    this.emit('model', entry.id);
+                    return;
+                }
                 state.status = 'error';
                 state.error = err?.message || String(err);
-                console.error('[editor] model load failed', err);
                 this.emit('model', entry.id);
             });
+    }
+
+    /**
+     * The model with the clips of these sources (key: their sourcesKey), made in memory in a worker
+     * (engine/clips.ts) the first time it is asked for; objects waiting for it show it once made.
+     * Nothing is stored: the model's file and the sources' files stay as they are.
+     */
+    private clipModel(key: string, assetId: string, sources: readonly ClipSourceDoc[]): ClipModel {
+        const known = this.clipModels.get(key);
+        if (known) return known;
+        const made: ClipModel = { status: 'making', done: Promise.resolve(), url: '', clips: [], problems: [] };
+        this.clipModels.set(key, made);
+        const list = sources.map((x) => ({ ...x }));
+        made.done = (async () => {
+            const meta = this.store.doc.assets.find((a) => a.id === assetId);
+            try {
+                if (!meta) throw new Error('the model asset is missing');
+                const bytes = await assetBytes(meta);
+                const files = new Map<string, ArrayBuffer>();
+                for (const id of sourceAssetIds(list)) {
+                    const m = this.store.doc.assets.find((a) => a.id === id);
+                    const b = m ? await assetBytes(m).catch(() => null) : null;
+                    if (b) files.set(id, b);
+                }
+                const r = await makeClips(bytes, list, files);
+                for (const line of r.report) console.info(`[clips] ${meta.name}: ${line}`);
+                for (const line of r.problems) console.warn(`[clips] ${meta.name}: ${line}`);
+                made.clips = r.clips;
+                made.problems = r.problems;
+                // The loader tells GLB from glTF by the name's extension.
+                if (r.glb) made.url = URL.createObjectURL(new Blob([r.glb as Uint8Array<ArrayBuffer>], { type: 'model/gltf-binary' })) + '#' + encodeURIComponent(meta.name.replace(/\.[^.]*$/, '') + '.glb');
+                made.status = 'ready';
+            } catch (e: any) {
+                console.warn(`[clips] no clips for ${meta?.name ?? assetId}`, e);
+                made.status = 'failed';
+                made.problems = [e?.message || String(e)];
+            }
+            // Forgotten meanwhile (its files were replaced): what was made goes too.
+            if (this.clipModels.get(key) !== made) {
+                if (made.url) URL.revokeObjectURL(made.url.split('#')[0]);
+                return;
+            }
+            for (const entry of Array.from(this.entries.values())) {
+                if (entry.model?.wantClips !== key) continue;
+                const node = this.store.node(entry.id);
+                if (node?.model) this.applyModel(entry, node.model, node.animation);
+                this.emit('model', entry.id);
+            }
+        })();
+        return made;
+    }
+
+    /** Forgets a model with clips: made again when asked for. */
+    private dropClipModel(key: string) {
+        const made = this.clipModels.get(key);
+        if (!made) return;
+        this.clipModels.delete(key);
+        this.prefabs.delete(`clips|${key}`);
+        // Late enough for a load that already started from it.
+        if (made.url) setTimeout(() => URL.revokeObjectURL(made.url.split('#')[0]), 30000);
+    }
+
+    /** Forgets the models with clips that no object shows or waits for (their sources changed). */
+    private sweepClipModels() {
+        const used = new Set<string>();
+        for (const e of this.entries.values()) {
+            for (let m = e.model; m; m = m.previous ?? null) {
+                if (m.clips) used.add(m.clips);
+                if (m.wantClips) used.add(m.wantClips);
+            }
+        }
+        for (const [key, made] of Array.from(this.clipModels)) if (!used.has(key) && made.status !== 'making') this.dropClipModel(key);
+    }
+
+    /**
+     * The clips its animation's sources made for a model object: whether they are being made, the
+     * clips made and what could not be made. Null without sources.
+     */
+    clipsOf(id: string): { status: ClipModel['status']; clips: string[]; problems: string[] } | null {
+        const want = this.entries.get(id)?.model?.wantClips;
+        const made = want ? this.clipModels.get(want) : undefined;
+        return made ? { status: made.status, clips: made.clips, problems: made.problems } : null;
+    }
+
+    /** Whether an object waits for the clips of its animation's sources (Play waits for them). */
+    clipsPending(): boolean {
+        for (const e of this.entries.values()) {
+            const m = e.model;
+            const made = m?.wantClips ? this.clipModels.get(m.wantClips) : undefined;
+            if (!m || !made) continue;
+            if (made.status === 'making' || (made.status === 'ready' && made.url && (m.clips !== m.wantClips || m.status === 'loading'))) return true;
+        }
+        return false;
     }
 
     /** The clip a model shows in the editor, moving while previewed (Play drives it: play/animation.ts). */
@@ -1211,8 +1370,14 @@ export class SceneSync extends Emitter<SyncEvents> {
     }
 
     private dropModel(entry: Entry) {
-        const m = entry.model;
-        if (!m) return;
+        if (entry.model) this.dropState(entry, entry.model);
+    }
+
+    private dropState(entry: Entry, m: ModelState) {
+        if (m.previous) {
+            this.dropState(entry, m.previous);
+            m.previous = undefined;
+        }
         m.token = -1;
         m.overrides?.dispose();
         m.motion?.dispose();
@@ -2329,7 +2494,7 @@ export class SceneSync extends Emitter<SyncEvents> {
     async whenLoaded(): Promise<void> {
         const all = () => [
             ...this.prefabs.values(), ...Array.from(this.groupPrefabs.values(), (g) => g.prefab), ...this.textures.values(), ...this.terrainLoads,
-            ...this.scatterModels.values(), ...(this.scatterPending ? [this.scatterPending] : []),
+            ...this.scatterModels.values(), ...(this.scatterPending ? [this.scatterPending] : []), ...Array.from(this.clipModels.values(), (c) => c.done),
         ];
         for (;;) {
             const pending = all();
@@ -2339,15 +2504,20 @@ export class SceneSync extends Emitter<SyncEvents> {
         }
     }
 
-    private loadPrefab(assetId: string): Promise<Object3D> {
-        let p = this.prefabs.get(assetId);
+    /** The model of an asset, or (`clips`: their key) the model with the clips its animation's sources made. */
+    private loadPrefab(assetId: string, clips = ''): Promise<Object3D> {
+        const cacheKey = clips ? `clips|${clips}` : assetId;
+        let p = this.prefabs.get(cacheKey);
         if (!p) {
             p = (async () => {
                 const meta = this.store.doc.assets.find((a) => a.id === assetId);
                 if (!meta) throw new Error('Model asset is missing from this project.');
                 const res = this.runtime.engine.res;
                 let prefab: Object3D | null = null;
-                const copy = await this.textureSource?.model?.(meta).catch(() => null);
+                const made = clips ? this.clipModels.get(clips)?.url : undefined;
+                if (clips && !made) throw new Error('The clips of its animation are not made.');
+                if (made) prefab = await res.loadGltf(made);
+                const copy = made ? null : await this.textureSource?.model?.(meta).catch(() => null);
                 if (copy) {
                     try {
                         prefab = await res.loadGltf(copy);
@@ -2370,8 +2540,8 @@ export class SceneSync extends Emitter<SyncEvents> {
                 });
                 return prefab;
             })();
-            p.catch(() => this.prefabs.delete(assetId));
-            this.prefabs.set(assetId, p);
+            p.catch(() => this.prefabs.delete(cacheKey));
+            this.prefabs.set(cacheKey, p);
         }
         return p;
     }
