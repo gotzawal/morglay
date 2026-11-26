@@ -23,7 +23,8 @@ import {
 import { Emitter } from './core/events';
 import { ask, confirmDialog, toast } from './core/messages';
 import { Animation as AnimationSchema, AudioSource, Grass, Mirror, Motion, Rain, Scatter, ScatterSource } from './core/model';
-import { addClipsToModel } from './core/clipImport';
+import { isPathAsset, parsePath, PATH_SUFFIX } from './core/motionPath';
+import { readGlbClips } from './core/retarget';
 import { SPECIES_NAME, TREE_SPECIES, TREE_VARIANTS, variantIndex, variantSeed, type TreeSpecies } from './core/trees';
 import { defaults } from './core/schema';
 import { DEG, add, compose, decompose, eulerFromQuat, invert, len, mat4, mul, sub, tidy3, transformDir, transformPoint } from './core/math';
@@ -34,7 +35,7 @@ import {
 import type { Store, Tool } from './core/store';
 import { className, SCRIPT_TEMPLATES, SHADER_TEMPLATES } from './core/templates';
 import type {
-    AnimeDoc, AnimeKind, AssetKind, AssetMeta, AssetSource, GeometryType, GrassDoc, LightType, MaterialOverride, MaterialSlotDoc, NodeDoc, ParamValue, PartOverride, PrefabDoc,
+    AnimeDoc, AnimeKind, AssetKind, AssetMeta, AssetSource, ClipSourceDoc, GeometryType, GrassDoc, LightType, MaterialOverride, MaterialSlotDoc, NodeDoc, ParamValue, PartOverride, PrefabDoc,
     ScatterDoc, SceneDoc, ScriptDoc, ShaderDoc, ShaderKind, TextureCompression, Vec3,
 } from './core/types';
 import { animeSetup } from './engine/animeSetup';
@@ -690,6 +691,10 @@ export class Editor extends Emitter<EditorEvents> {
                     await this.importFiles(pkg.files, at);
                     continue;
                 }
+                if (lower.endsWith(PATH_SUFFIX)) {
+                    await this.importPath(file);
+                    continue;
+                }
                 if (lower.endsWith('.json')) {
                     await this.openSceneFromFile(file);
                     continue;
@@ -697,7 +702,7 @@ export class Editor extends Emitter<EditorEvents> {
                 const kind = kindOf(file);
                 // A clip GLB dropped with a .pmx is a motion for it (retargeted in the conversion).
                 if (kind === 'model' && files.some((f) => /\.pmx$/i.test(f.name)) && (await isClipGlb(file))) continue;
-                // Any other motion file (no meshes) goes onto the selected models.
+                // Any other motion file (no meshes) is an Animation asset the selected models play.
                 if (kind === 'model' && (await isClipGlb(file))) await this.importClip(file);
                 else if (kind === 'model') await this.importModel(file, at, files);
                 else if (kind === 'texture') {
@@ -714,47 +719,92 @@ export class Editor extends Emitter<EditorEvents> {
 
     /**
      * A motion file (a GLB of a skeleton and clips, no meshes: Mixamo converted
-     * from FBX, VRoid, a game's clip) put on the selected models:
-     * retargeted onto each model's bones by their humanoid roles and written into a
-     * new copy of its file, which the objects showing it then use, playing the new
-     * clip. Other objects showing the old file keep it. One undo step takes it back.
+     * from FBX, VRoid, a game's clip) becomes an Animation asset of its own, and
+     * the selected models (or the only character) play its clips: each a source
+     * of their animation, retargeted onto their bones when they load
+     * (core/clipSources.ts). Their files stay as they are. One undo step takes
+     * it back.
      */
     async importClip(file: File, ids = this.store.selectionRoots()) {
-        const targets = ids.map((id) => this.store.node(id)).filter((n): n is NonNullable<typeof n> => !!n?.model);
+        const meta = await putAsset(file, file.name, 'clip');
+        const added = await this.addAnimationSource(meta, ids);
+        if (!added.length) toast(`Imported ${file.name}: drop it on a model, or add it in a model's Animation section.`, 'info');
+    }
+
+    /**
+     * A path file (<name>.path.json: where a body walks and when, core/motionPath.ts)
+     * becomes a Path asset, and the selected models (or the only character) walk it:
+     * a walk source of their animation, made for their bodies when they load.
+     */
+    async importPath(file: File, ids = this.store.selectionRoots()) {
+        const path = parsePath(await file.text());
+        const meta = await putAsset(new Blob([file], { type: 'application/json' }), file.name, 'data');
+        const added = await this.addAnimationSource(meta, ids);
+        if (!added.length) toast(`Imported ${file.name} (${path.length.toFixed(1)} m in ${path.duration.toFixed(1)} s): add it in a model's Animation section to walk it.`, 'info');
+    }
+
+    /**
+     * The model objects a motion goes onto: those among `ids` showing a model, else the
+     * only object in the scene whose model has a skeleton.
+     */
+    animationTargets(ids: string[] = this.store.selectionRoots()): string[] {
+        const picked = ids.filter((id) => this.store.node(id)?.model && !this.store.node(id)?.prefabChild);
+        if (picked.length) return picked;
+        const skinned = this.store.doc.nodes.filter((n) => n.model && this.sync.modelInfo(n.id)?.skeleton);
+        return skinned.length === 1 ? [skinned[0].id] : [];
+    }
+
+    /**
+     * The objects among `ids` (or the only character) play clips made from an asset: a path
+     * asset's walk, or each clip of a clip file, added as sources of their animation
+     * (AnimationDoc.sources), the first of them played. Their model files stay as they are.
+     * `asset` is an asset of the project, or one just stored, which joins it in the same
+     * undo step. Returns the objects changed.
+     */
+    async addAnimationSource(asset: string | AssetMeta, ids?: string[]): Promise<string[]> {
+        const fresh = typeof asset !== 'string' && !this.store.doc.assets.some((a) => a.id === asset.id);
+        const meta = typeof asset === 'string' ? this.store.doc.assets.find((a) => a.id === asset) : asset;
+        if (!meta || (meta.kind !== 'clip' && !isPathAsset(meta))) return [];
+        const targets = this.animationTargets(ids);
         if (!targets.length) {
-            toast(`${file.name} is a motion: select the model to put it on, then drop it again.`, 'info');
-            return;
+            if (fresh) this.store.commit(meta.kind === 'clip' ? 'Import Motion' : 'Import Path', (doc) => void doc.assets.push(meta));
+            return [];
         }
-        const clipBytes = await file.arrayBuffer();
-        const stem = file.name.replace(/\.glb$/i, '');
-        const done: { from: string; meta: AssetMeta; clip: string; nodes: string[] }[] = [];
-        for (const asset of new Set(targets.map((n) => n.model!.asset))) {
-            const old = this.store.doc.assets.find((a) => a.id === asset);
-            const blob = await getAssetBlob(asset);
-            if (!blob || !old) {
-                toast('The model file is missing.', 'error');
-                continue;
+        // What the asset gives: one walk, or a clip for each take of the file.
+        let takes: { name: string; take?: string }[];
+        if (meta.kind === 'clip') {
+            const blob = await getAssetBlob(meta.id);
+            const clips = blob ? (readGlbClips(await blob.arrayBuffer())?.clips ?? []) : [];
+            if (!clips.length) {
+                toast(`${meta.name} has no clips.`, 'error');
+                if (fresh) this.store.commit('Import Motion', (doc) => void doc.assets.push(meta));
+                return [];
             }
-            const r = addClipsToModel(await blob.arrayBuffer(), clipBytes, stem);
-            for (const line of r.report) console.info(`${file.name} → ${old.name}: ${line}`);
-            const meta = await putAsset(new Blob([r.glb as Uint8Array<ArrayBuffer>], { type: 'model/gltf-binary' }), old.name, 'model');
-            done.push({ from: asset, meta, clip: r.names[0], nodes: targets.filter((n) => n.model!.asset === asset).map((n) => n.id) });
-        }
-        if (!done.length) return;
-        this.store.transact('Add Motion', () => {
-            this.store.update((doc) => {
-                for (const d of done) {
-                    doc.assets.push(d.meta);
-                    for (const id of d.nodes) {
-                        const node = doc.nodes.find((n) => n.id === id);
-                        if (!node?.model) continue;
-                        node.model.asset = d.meta.id;
-                        node.animation = AnimationSchema.parse({ ...(node.animation ?? {}), clip: d.clip });
-                    }
-                }
-            });
-        });
-        toast(`${file.name}: ${done[0].clip} added to ${targets.length === 1 ? targets[0].name : `${targets.length} objects`}.`, 'success');
+            const stem = meta.name.replace(/\.glb$/i, '');
+            // One clip is named after the file (a Mixamo take is called "mixamo.com"), several after their takes.
+            takes = clips.length === 1 ? [{ name: stem, take: clips[0].name }] : clips.map((c, i) => ({ name: c.name || `${stem} ${i + 1}`, take: c.name }));
+        } else takes = [{ name: meta.name.slice(0, -PATH_SUFFIX.length) || 'Walk' }];
+        let first = '';
+        this.store.commit(fresh ? (meta.kind === 'clip' ? 'Add Motion' : 'Add Path Walk') : 'Add Animation Clip', (doc) => {
+            if (fresh) doc.assets.push(meta);
+            for (const id of targets) {
+                const node = doc.nodes.find((n) => n.id === id);
+                if (!node?.model) continue;
+                const anim = node.animation ?? defaults(AnimationSchema);
+                const taken = new Set([...(this.sync.modelInfo(id)?.clips ?? []), ...anim.sources.map((x) => x.name)]);
+                const added: ClipSourceDoc[] = takes.map((t) => {
+                    let name = t.name;
+                    for (let k = 2; taken.has(name); k++) name = `${t.name} (${k})`;
+                    taken.add(name);
+                    return meta.kind === 'clip' ? { name, clip: meta.id, ...(t.take ? { take: t.take } : {}) } : { name, walk: meta.id };
+                });
+                first ||= added[0].name;
+                node.animation = AnimationSchema.parse({ ...anim, clip: added[0].name, sources: [...anim.sources, ...added] });
+            }
+        }, fresh ? undefined : { nodes: targets });
+        const who = targets.length === 1 ? this.store.node(targets[0])?.name : `${targets.length} objects`;
+        toast(`${who} plays ${first}${takes.length > 1 ? ` and ${takes.length - 1} more` : ''}, made for ${targets.length === 1 ? 'its body as it loads' : 'their bodies as they load'}.`, 'success');
+        return targets;
     }
 
     /** `with`: files imported with it, where a .gltf finds the files it names (they are packed into one GLB). */

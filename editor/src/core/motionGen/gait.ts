@@ -13,8 +13,10 @@
 //   the steps     gaitFor      speed ─► cadence, step, stance share (dimensionless: Froude number)
 //   the feet      footModel    a standing foot rolls heel, flat, forefoot; a swinging one goes the
 //                              smoothest way from how it left the floor to how it meets it
-//   the support   vault        the body carried over a leg kept long: the standing knee follows
-//                              a course, and the hips' height comes from it
+//   the support   vault        the body carried over a leg kept long (a walk): the standing knee
+//                              follows a course, and the hips' height comes from it
+//                 bounce       the body thrown up by each foot's push (a run, a sprint): the hips
+//                              rise and fall as the push and gravity make them; the knees follow
 //   the pelvis    pelvisModel  sway, turn and list as waves; surge
 //   the rest      gaitCycle    legs by two-bone IK, turned about the upright together; the chest
 //                              and the head keep their own places to the side, and the spine and
@@ -26,25 +28,27 @@
 // cannot happen. Every length is a share of the body's own, so a body k times as tall going
 // √k times as fast takes the same pose.
 //
-// The formulas, how their values were fitted and which to change when something looks wrong:
-// editor/MOTION.md.
+// The formulas and which value to change when something looks wrong: editor/MOTION.md.
 
 import type { Body } from './body';
 import { armBones, footTurn, kneeFor, leanToJoin, legPose, legSpan } from './limbs';
 import { rolled, rollTo, soleRoll } from './sole';
-import { add, cross, dot, normalize, qmul, rotate, scale, sub, type Quat, type V3 } from '../rigMotion';
+import { add, dot, normalize, qmul, rotate, scale, sub, type Quat, type V3 } from '../rigMotion';
 import { axisAngle, bridge, clamp, DEG, GRAVITY, lerp, minJerk, move, quintic, slerp, viaCurve, wave } from './tools';
+
+/** The kinds of gait: a walk, and a run (it flies between steps; the faster, the more). */
+export type GaitKind = 'walk' | 'run';
 
 /**
  * A wave once a stride: how big it is, when it is at its most (as a share of the stride after
  * the left heel strikes), and its third harmonic riding on it (its size as a share of the
- * first, and when it peaks). One wave alone rises and falls evenly; the third lets it rise
- * fast and come back slowly, or flattens its top.
+ * first; every wave's third peaks at the same time of the stride, GaitStyle.thirdAt). One wave
+ * alone rises and falls evenly; the third lets it rise fast and come back slowly, or flattens its top.
  */
 export interface Wave {
     size: number;
     at: number;
-    third?: [number, number];
+    third?: number;
 }
 
 /**
@@ -79,7 +83,28 @@ export interface Vault {
     surgeAt: number;
 }
 
-/** A gait's numbers: its steps, how the body is carried, the swing, the pelvis, the chest and head, the arms. */
+/**
+ * The body thrown up by each foot's push (a run, a sprint): the hips rise and fall as the
+ * floor's push and gravity make them, as high as the legs still reach, and the knees follow.
+ */
+export interface Bounce {
+    how: 'bounce';
+    /** The standing foot's roll: the shares of stance where the heel rocker ends and the forefoot rocker starts. */
+    rockers: [number, number];
+    /** How fast the foot is turning flat as its heel strikes, over the heel rocker's mean rate (the fastest is 2.5: past it the toes would dip under the floor). */
+    strikeRoll: number;
+    /**
+     * Foot pitch as the toes leave, degrees, and how fast the foot is turning then, over the
+     * forefoot rocker's mean rate (1: evenly all the way; 2: faster and faster). Turning fast,
+     * the ankle is thrown forward at once; turning evenly, it is left behind first.
+     */
+    toeOff: number;
+    toeOffRate: number;
+    /** The least the standing knee bends, degrees: as the heel strikes, and as the toes leave. */
+    kneeLeast: [number, number];
+}
+
+/** A kind of gait: its steps, how the body is carried, the swing, the pelvis, the chest and head, the arms. */
 export interface GaitMode {
     // ---- The steps.
     /** Stance share of the stride: duty[0] − duty[1]·√Fr. */
@@ -96,7 +121,7 @@ export interface GaitMode {
     maxDrop: number;
 
     // ---- How the body is carried.
-    support: Vault;
+    support: Vault | Bounce;
 
     // ---- The swing (core/motionGen/gait.ts footModel).
     /** The ankle's lift in mid-swing over the leg's length: lift[0] + lift[1]·√Fr; and the share of the swing at which it is highest. */
@@ -109,13 +134,13 @@ export interface GaitMode {
     passAt: number;
     /**
      * How hard the leg is drawn forward as the toes leave: 0, the foot leaves as it was going
-     * (left behind first, thrown on late); 1, it is already speeding up as it
+     * (left behind first, thrown on late: a runner's); 1, it is already speeding up as it
      * leaves, as much as the smoothest swing asks (drawn through at once). Too little in a walk
      * and the leg waits, then snaps forward.
      */
     swingPull: number;
     /**
-     * A foot thrown ahead and pulled back before it lands: the share of the swing
+     * A foot thrown ahead and pulled back before it lands (a runner's): the share of the swing
      * at which the ankle is farthest ahead of its hip. From there it slows evenly to its
      * landing speed. (0: it is farthest ahead as it lands.)
      */
@@ -155,8 +180,8 @@ export interface GaitMode {
     /**
      * The chest gives with each step: how far its lean comes and goes (degrees each way), and
      * when it leans most, as a share of the stride after a strike. Leaning most where the hips
-     * are highest, it takes some of the bob out of the head; leaning back as the hips surge
-     * ahead, it takes up their fore and aft instead of passing it on.
+     * are highest, it takes some of the bounce out of the head (a sprint); leaning back as the
+     * hips surge ahead, it takes up their fore and aft instead of passing it on (a walk).
      */
     nod: [number, number];
     /**
@@ -167,13 +192,6 @@ export interface GaitMode {
     headFollow: number;
     headRoll: number;
     headLean: number;
-    /**
-     * The head's own nod with each step: how far it tips (degrees each way), and when it tips
-     * forward most, as a share of the stride after a strike. It tips forward about when it is
-     * highest and back as the foot lands: what keeps the eyes on a point ahead while the body
-     * bobs. The neck takes its part of it (`neck`).
-     */
-    headNod: [number, number];
     /** The head's own tilt to the side once a stride: how far (degrees each way), and when its left side is highest, as a share of the stride. */
     headTilt: [number, number];
     /**
@@ -195,7 +213,7 @@ export interface GaitMode {
     neck: number;
 
     // ---- The arms.
-    /** How much of the chest's twist the arms' swing takes: 0, they swing in the body's fore and aft; 1, in the chest's own (the hand comes across the body in front, the elbow goes in behind it). */
+    /** How much of the chest's twist the arms' swing takes: 0, they swing in the body's fore and aft; 1, in the chest's own (a runner's hand comes across the body in front, the elbow goes in behind it). */
     armFollow: number;
     /** How late the arms swing behind the legs, as a share of the stride (below zero: ahead of them). */
     armLag: number;
@@ -229,44 +247,80 @@ export interface GaitMode {
 }
 
 export interface GaitStyle {
-    /** Toe-out, degrees: toeOut[0] − toeOut[1]·√Fr, not below 0. */
-    toeOut: [number, number];
+    /** A walk becomes a run above this Froude number (v² / g·hip height). */
+    runAt: number;
+    /** When every wave's third harmonic peaks (share of a stride after the left heel strikes): one time for all of them, walking or running. */
+    thirdAt: number;
+    /**
+     * A run's arms are driven fully (the elbows held bent and snapped, the swing across the body) from this Froude number
+     * up, and while the body speeds up; between the walk's top and here they are held only part of the way from the walk's
+     * loose swing toward the run's (gait.ts armsAt), so a run that slows lets its arms go.
+     */
+    armDrive: number;
+    /** Toe-out, degrees. */
+    toeOut: number;
     /** The sole's clearance in swing, over hip height. */
     clearance: number;
-    /** Lean of the chest and of the pelvis, degrees forward: each [0] + [1]·√Fr, not below 0 (leaning more the faster it goes). */
+    /** Lean of the chest and of the pelvis alike (the trunk leans as one from the hips), degrees forward: [0] + [1]·√Fr, not below 0 (upright walking, leaning more the faster it runs). */
     lean: [number, number];
-    pelvisLean: [number, number];
     /** The widest an arm swings to each side, degrees. */
     armMost: number;
     walk: GaitMode;
+    run: GaitMode;
 }
+
+/** The terms a gait may leave out; each is then at its plainest (nothing: no pull, no tilt, no nod, no lag, ...). */
+type Plain = 'reachAt' | 'land' | 'swingPull' | 'pelvisTilt' | 'swingTurn' | 'nod' | 'chestRoll' | 'headRoll' | 'headTilt' | 'armFollow' | 'armIn' | 'armLoop' | 'elbowLag' | 'wristLag' | 'wristFlick';
+
+/** A gait's numbers, with every term it leaves out at its plainest. */
+export const gaitMode = (m: Omit<GaitMode, Plain> & Partial<Pick<GaitMode, Plain>>): GaitMode => ({
+    reachAt: 0, land: 0, swingPull: 0, pelvisTilt: 0, swingTurn: [0, 0], nod: [0, 0], chestRoll: 0, headRoll: 0, headTilt: [0, 0], armFollow: 0, armIn: 0, armLoop: 0, elbowLag: 0, wristLag: 0, wristFlick: 0,
+    ...m,
+});
+
+/** The walk's numbers (the run's take some of them as they are). */
+export const WALK_STYLE: GaitMode = gaitMode({
+    duty: [0.6, 0.18], rate: [0.22, 0.75], lead: 0.4, width: 0.02, strike: 0.75, maxDrop: 0.1,
+    support: { how: 'vault', kneeStrike: [13, 8], kneeLoad: [14, 32], kneeLeast: 12, kneeToeOff: 16, loadAt: 0.35, leastAt: 0.8, ease: 1.3, sink: 0.05, surge: 0.8, surgeAt: 0.17 },
+    lift: [0.09, 0.08], liftAt: 0.38, swingOut: 0.045, outAt: 0.35, passAt: 0.6, swingPull: 1, strikeSpeed: 1.6,
+    sway: { size: 0.015, at: 0.2, third: 0.12 }, yaw: { size: 0.18, at: 0.45, third: 0.12 }, list: { size: 0.095, at: 0.18, third: 0.33 }, pelvisTilt: 0.11, legTurn: { size: 0.17, at: 0.5 }, swingTurn: [8, 0.45],
+    chest: { size: 0.2, at: 0.003 }, nod: [1.2, 0.35], headFollow: 0.15, headLean: 0.5, headSway: { size: 0.002, at: 0.3 }, chestSway: { size: 0.0019, at: 0.35 }, neck: 0.9,
+    armLag: 0.022, arm: 0.6, armBias: -0.14, armOut: 16, elbow: [4, 18], elbowSnap: 0.7, elbowLag: 0.09, wristLag: 0.03, wristFlick: 0.16, shoulderGive: 0.23,
+});
 
 /**
  * The defaults. Each is a share of the body's own size, an angle or a share of the stride;
- * none is a pose or a curve taken from a clip. Their values were set so that the walk they
- * make measures close to a stylised walk (editor/MOTION.md).
+ * none is a pose or a curve taken from a clip.
  */
 export const GAIT_STYLE: GaitStyle = {
-    toeOut: [1, 0],
+    runAt: 0.5,
+    thirdAt: 0.15,
+    armDrive: 2.5,
+    toeOut: 1,
     clearance: 0.015,
-    lean: [-23, 30],
-    pelvisLean: [-23, 27],
+    lean: [-23, 28],
     armMost: 60,
-    walk: {
-        duty: [0.6, 0.18], rate: [0.22, 0.75], lead: 0.4, width: 0.02, strike: 0.75, maxDrop: 0.1,
-        support: { how: 'vault', kneeStrike: [13, 8], kneeLoad: [14, 32], kneeLeast: 12, kneeToeOff: 16, loadAt: 0.35, leastAt: 0.8, ease: 1.3, sink: 0.05, surge: 0.8, surgeAt: 0.17 },
-        lift: [0.09, 0.08], liftAt: 0.38, swingOut: 0.045, outAt: 0.35, passAt: 0.6, swingPull: 1, reachAt: 0, strikeSpeed: 1.6, land: 0,
-        sway: { size: 0.015, at: 0.2, third: [0.12, 0.15] }, yaw: { size: 0.18, at: 0.45, third: [0.12, 0.15] }, list: { size: 0.095, at: 0.18, third: [0.33, 0.15] }, pelvisTilt: 0.11, legTurn: { size: 0.17, at: 0.5 }, swingTurn: [8, 0.45],
-        chest: { size: 0.2, at: 0.003, third: [0.11, 0.014] }, chestRoll: -0.15, nod: [1.2, 0.35], headFollow: 0.15, headRoll: 0, headLean: 0.5, headNod: [1.3, 0.23], headTilt: [0.6, 0.35], headSway: { size: 0.002, at: 0.3 }, chestSway: { size: 0.0019, at: 0.35 }, neck: 0.9,
-        armFollow: 0, armLag: 0.022, arm: 0.6, armBias: -0.14, armOut: 16, armIn: 4, armLoop: 2, elbow: [4, 18], elbowSnap: 0.7, elbowLag: 0.09, wristLag: 0.03, wristFlick: 0.16, shoulderGive: 0.23,
-    },
+    walk: WALK_STYLE,
+    // (A run sways, turns and lists to the walk's times and harmonics, and swings a foot out when a walk does.)
+    run: gaitMode({
+        duty: [0.45, 0.12], rate: [0.7, 0.14], lead: 0.19, width: 0.04, strike: 0.22, maxDrop: 0.25,
+        support: { how: 'bounce', rockers: [0.3, 0.65], strikeRoll: 1.3, toeOff: 37, toeOffRate: 1.5, kneeLeast: [20, 19] },
+        lift: [0.2, 0.2], liftAt: 0.35, swingOut: 0.02, outAt: WALK_STYLE.outAt, passAt: 0.65, reachAt: 0.9, strikeSpeed: 0.5, land: 0.5,
+        sway: { ...WALK_STYLE.sway, size: 0.013 }, yaw: { ...WALK_STYLE.yaw, size: 0.1, at: 0.06 }, list: { ...WALK_STYLE.list, at: 0.045, third: 0.6 }, legTurn: { ...WALK_STYLE.legTurn, size: 0.04 },
+        chest: { size: 0.3, at: -0.1 }, chestRoll: -0.28, headFollow: 0.04, headLean: 0.4, neck: 0.6,
+        armFollow: 1, armLag: -0.14, arm: 0.55, armBias: -1, armOut: 22, elbow: [45, 60], elbowSnap: 2, elbowLag: -0.11, shoulderGive: 0.15,
+    }),
 };
 
 /** A gait at one speed: its numbers. */
 export interface Gait {
     speed: number;
-    /** The numbers that make it. */
+    /** The kind it is, or is nearest to. */
+    kind: GaitKind;
+    /** The numbers that make it: its kind's, or a mix of two kinds' where one is turning into the other. */
     mode: GaitMode;
+    /** It flies between steps (a run, a sprint). */
+    run: boolean;
     /** v² / (g · hip height). */
     froude: number;
     /** Metres from one footfall to the next, and seconds. */
@@ -284,6 +338,7 @@ export interface Gait {
     /** The legs' swing angle: asin(step / 2·leg), radians. */
     swing: number;
     strikePitch: number;
+    toeOffPitch: number;
     /** How far the pelvis sinks below standing at its lowest, metres. */
     drop: number;
 }
@@ -320,6 +375,8 @@ interface FootState {
     /** Toes up, radians: the foot, and its toes (the same where they do not bend). */
     pitch: number;
     toes: number;
+    /** The least the knee bends here, radians (a run's stance). */
+    flex: number;
     /** The sole point on the floor it turns about, from the flat ankle (null: flat). */
     pivot: V3 | null;
 }
@@ -353,15 +410,22 @@ const footFlat = (body: Body, g: Gait, foot: number, cycle: number): V3 =>
 
 /**
  * The feet of a gait: where each ankle is and how the foot is pitched, at any time. A standing
- * foot rolls as `roll` says (its roll comes from the knee's course). A swinging foot is timed
+ * foot rolls as `roll` says (a gait that vaults: its roll comes from the knee's course) or, in
+ * a gait that bounces, over its heel and its forefoot on set courses. A swinging foot is timed
  * against its hip's way over the ground (`over`), and with `lean` it hangs from its shin.
  */
-function footModel(body: Body, g: Gait, style: GaitStyle, over: Hip, roll: Roll, lean?: Lean): Feet {
+function footModel(body: Body, g: Gait, style: GaitStyle, over: Hip, roll?: Roll, lean?: Lean): Feet {
     const mode = g.mode;
     const { left, up, fwd } = body;
     const h = body.ankleHeight;
     const { ball, tip } = body.sole;
     const sole = soleRoll(body);
+    // The set courses of a foot that bounces: its rockers, and the least its knee bends from the strike to the toes leaving.
+    const how = mode.support.how === 'bounce' ? mode.support : null;
+    const [r1, r2] = how ? how.rockers : [0, 1];
+    const slap = how ? Math.min(2.5, how.strikeRoll) : 0;
+    const turnOff = how ? clamp(how.toeOffRate, 1, 3) : 1;
+    const [least0, least1] = how ? [how.kneeLeast[0] * DEG, how.kneeLeast[1] * DEG] : [0, 0];
     const point = (f: V3, o: number): V3 => add(scale(f, o), scale(up, -h));
 
     /** A foot pitched (toes up) rolling on its sole: its ankle from where it stands flat, and the sole point on the floor. */
@@ -379,12 +443,25 @@ function footModel(body: Body, g: Gait, style: GaitStyle, over: Hip, roll: Roll,
     /** Stance of a foot's `cycle`-th stride, from the strike (0) to the toes leaving (1): heel rocker, flat, forefoot rocker. */
     const stance = (foot: number, cycle: number, p: number): FootState => {
         const f = footHeading(body, g, foot);
-        const r = roll(foot, (cycle + 0.5 * foot + p * g.duty) * g.stride, p);
-        // Toes that bend, bent as far as they go: the ball is off the floor and the foot stands on their tip.
-        if (!body.stiffToes && r.toes < 0) return { rel: tiptoe(f, r.toes, r.pitch), pitch: r.pitch, toes: r.toes, pivot: point(f, tip) };
-        const at = placed(f, r.pitch);
-        // Toes that do not bend go with the foot; toes that do stay on the floor while the heel rises.
-        return { rel: at.rel, pitch: r.pitch, toes: r.pitch > 0 || body.stiffToes ? r.pitch : 0, pivot: at.pivot };
+        if (roll) {
+            const r = roll(foot, (cycle + 0.5 * foot + p * g.duty) * g.stride, p);
+            // Toes that bend, bent as far as they go: the ball is off the floor and the foot stands on their tip.
+            if (!body.stiffToes && r.toes < 0) return { rel: tiptoe(f, r.toes, r.pitch), pitch: r.pitch, toes: r.toes, flex: 0, pivot: point(f, tip) };
+            const at = placed(f, r.pitch);
+            // Toes that do not bend go with the foot; toes that do stay on the floor while the heel rises.
+            return { rel: at.rel, pitch: r.pitch, toes: r.pitch > 0 || body.stiffToes ? r.pitch : 0, flex: 0, pivot: at.pivot };
+        }
+        const flex = lerp(least0, least1, minJerk(p));
+        if (p < r1) {
+            // The foot is already turning flat as the heel strikes (the heel stops, the ankle goes on), and settles.
+            const pitch = quintic(g.strikePitch, -slap * g.strikePitch, 0, 0, p / r1);
+            return { ...placed(f, pitch), pitch, toes: pitch, flex };
+        }
+        if (p > r2) {
+            const pitch = -g.toeOffPitch * Math.pow((p - r2) / (1 - r2), turnOff);
+            return { ...placed(f, pitch), pitch, toes: body.stiffToes ? pitch : 0, flex };
+        }
+        return { rel: [0, 0, 0], pitch: 0, toes: 0, flex, pivot: null };
     };
 
     /**
@@ -520,6 +597,7 @@ function footModel(body: Body, g: Gait, style: GaitStyle, over: Hip, roll: Roll,
                 pitch,
                 // Toes that bend come back in line with the foot in the first quarter of the swing.
                 toes: body.stiffToes ? pitch : lerp(a.toes, pitch, minJerk(u / 0.25)),
+                flex: 0,
                 pivot: null,
             };
         };
@@ -553,25 +631,28 @@ function kneeBends(g: Gait, how: Vault) {
 function pelvisModel(body: Body, g: Gait, style: GaitStyle) {
     const mode = g.mode;
     const { left, up, fwd } = body;
-    // The body surges fore and aft as an inverted pendulum does between two footfalls (slowest
-    // over the standing foot). The pendulum's size is kept and its corners are not: one sine a
-    // step (its own curve turns sharply at every footfall, where two feet share the weight and
-    // it does not).
-    const T = g.stepTime, w = Math.sqrt(GRAVITY / (body.massHeight * body.hipHeight));
-    const A = g.step / 2 / Math.sinh((w * T) / 2);
-    const lagAt = Math.acosh(Math.max(1, g.speed / (A * w))) / w;
-    const surgeMost = mode.support.surge * (g.speed * lagAt - A * Math.sinh(w * lagAt));
-    const surgeAt = mode.support.surgeAt;
+    // A gait that vaults surges fore and aft as an inverted pendulum does between two footfalls
+    // (slowest over the standing foot). The pendulum's size is kept and its corners are not:
+    // one sine a step (its own curve turns sharply at every footfall, where two feet share the
+    // weight and it does not).
+    let surgeMost = 0, surgeAt = 0;
+    if (mode.support.how === 'vault') {
+        const T = g.stepTime, w = Math.sqrt(GRAVITY / (body.massHeight * body.hipHeight));
+        const A = g.step / 2 / Math.sinh((w * T) / 2);
+        const lagAt = Math.acosh(Math.max(1, g.speed / (A * w))) / w;
+        surgeMost = mode.support.surge * (g.speed * lagAt - A * Math.sinh(w * lagAt));
+        surgeAt = mode.support.surgeAt;
+    }
     const hipsToMid = scale(add(sub(body.ref.leftUpperLeg, body.ref.hips), sub(body.ref.rightUpperLeg, body.ref.hips)), 0.5);
-    const lean = Math.max(0, style.pelvisLean[0] + style.pelvisLean[1] * Math.sqrt(g.froude)) * DEG;
+    const lean = Math.max(0, style.lean[0] + style.lean[1] * Math.sqrt(g.froude)) * DEG;
     return (t: number) => {
         const phase = t / g.stride;
         // Over the standing foot (toward the left while the left foot stands); ahead of the mean before the foot is passed, behind after.
-        const sway = mode.sway.size * body.hipHeight * wave(phase, mode.sway.at, mode.sway.third);
+        const sway = mode.sway.size * body.hipHeight * wave(phase, mode.sway.at, mode.sway.third, style.thirdAt);
         const surge = surgeMost * Math.cos(4 * Math.PI * (phase - surgeAt));
         // It turns with the legs, lists as each foot takes the weight, and tips forward as each foot lands.
-        const yaw = mode.yaw.size * g.swing * wave(phase, mode.yaw.at, mode.yaw.third);
-        const list = mode.list.size * g.swing * wave(phase, mode.list.at, mode.list.third);
+        const yaw = mode.yaw.size * g.swing * wave(phase, mode.yaw.at, mode.yaw.third, style.thirdAt);
+        const list = mode.list.size * g.swing * wave(phase, mode.list.at, mode.list.third, style.thirdAt);
         const tilt = lean + mode.pelvisTilt * g.swing * Math.cos(4 * Math.PI * phase);
         const rot = qmul(axisAngle(up, yaw), qmul(axisAngle(fwd, list), axisAngle(left, tilt)));
         const mid = add(scale(fwd, g.speed * t + surge), scale(left, sway));
@@ -585,6 +666,72 @@ function pelvisModel(body: Body, g: Gait, style: GaitStyle) {
 function hipsOver(body: Body, g: Gait, style: GaitStyle): Hip {
     const pelvis = pelvisModel(body, g, style);
     return (i, at) => { const q = pelvis(at); return add(q.across, rotate(q.rot, sub(body.ref[`${LEG[i]}UpperLeg`], body.ref.hips))); };
+}
+
+/**
+ * The rise and fall of a gait that flies, over a step: down and up through stance, a throw
+ * through the air. Zero as the heel strikes and as the toes leave (it lands as high as it
+ * leaves). In stance the floor's push swells and fades like half a sine, and over the whole
+ * step it carries the body's weight; in the air only gravity acts.
+ */
+function bounce(g: Gait, sinceStrike: number): number {
+    const contact = g.duty * g.stride;
+    const flight = g.stepTime - contact;
+    if (flight <= 0) return 0;
+    if (sinceStrike < contact) {
+        const push = (Math.PI * GRAVITY * g.stepTime) / (2 * contact);
+        return -((GRAVITY * flight) / 2) * sinceStrike + ((push * contact) / Math.PI) * (sinceStrike - (contact / Math.PI) * Math.sin((Math.PI * sinceStrike) / contact)) - (GRAVITY * sinceStrike * sinceStrike) / 2;
+    }
+    const a = sinceStrike - contact;
+    return ((GRAVITY * flight) / 2) * a - (GRAVITY * a * a) / 2;
+}
+
+/**
+ * How high a run's hips joint may be at an instant of a stride: as high as both legs still
+ * reach their ankles (the swinging one too: the pelvis comes down for the leg that reaches
+ * out to land).
+ */
+function reachModel(body: Body, g: Gait, style: GaitStyle): (t: number) => number {
+    const foot = footModel(body, g, style, hipsOver(body, g, style)), pelvis = pelvisModel(body, g, style);
+    return (at: number) => {
+        const t = at - Math.floor(at / g.stride) * g.stride;
+        const p = pelvis(t);
+        let top = Infinity;
+        for (let i = 0; i < 2; i++) {
+            const f = foot(i, t);
+            const socket = add(p.across, rotate(p.rot, sub(body.ref[`${LEG[i]}UpperLeg`], body.ref.hips)));
+            const d = sub(f.ankle, socket);
+            const flat = Math.hypot(dot(d, body.fwd), dot(d, body.left));
+            // A standing leg keeps its knee bent at least so far; a swinging one may straighten.
+            const reach = f.standing ? legSpan(body, f.flex) : 0.999 * body.leg;
+            const socketUp = dot(socket, body.up) - dot(p.across, body.up);
+            top = Math.min(top, dot(f.ankle, body.up) + Math.sqrt(Math.max(0, reach * reach - flat * flat)) - socketUp);
+        }
+        return top;
+    };
+}
+
+/**
+ * The least of a quantity over a stride: the least of `count` instants, then found between that one's neighbours to a
+ * hair, so that a gait a little different has a least a little different, never one that jumps from instant to instant.
+ */
+function leastOver(of: (t: number) => number, stride: number, count: number): number {
+    let k0 = 0, least = Infinity;
+    for (let k = 0; k < count; k++) { const v = of((k * stride) / count); if (v < least) { least = v; k0 = k; } }
+    if (least === Infinity) return least;
+    let a = ((k0 - 1) * stride) / count, b = ((k0 + 1) * stride) / count;
+    const r = (Math.sqrt(5) - 1) / 2;
+    let c = b - r * (b - a), d = a + r * (b - a), fc = of(c), fd = of(d);
+    for (let it = 0; it < 30; it++) {
+        if (fc < fd) { b = d; d = c; fd = fc; c = b - r * (b - a); fc = of(c); } else { a = c; c = d; fc = fd; d = a + r * (b - a); fd = of(d); }
+    }
+    return Math.min(least, fc, fd);
+}
+
+/** The lowest the running hips must go in a stride, measured against the run's own bounce. */
+function lowest(body: Body, g: Gait, style: GaitStyle): number {
+    const top = reachModel(body, g, style);
+    return leastOver((t) => top(t) - bounce(g, t - Math.floor(t / g.stepTime + 1e-9) * g.stepTime), g.stride, 48);
 }
 
 /** A vaulting gait's hips and how its feet roll under them. */
@@ -848,41 +995,79 @@ function vault(body: Body, g: Gait, style: GaitStyle): Vaulted {
 }
 
 /**
- * The walk of a body at a speed (m/s, above zero). The step comes from the speed; the foot
- * lands a share of the step ahead of the hips. A step the legs cannot take (the pelvis sinking
- * past `maxDrop`, a leg stretched straight before its toes leave) is shortened, the steps
- * quickened.
+ * The gait of a body at a speed (m/s, above zero): the kind its speed asks for, or the one
+ * given. The step comes from the speed. Where the
+ * foot lands ahead of the hips: walking, a share of the step; running, where the pelvis sinks
+ * least. A step the legs cannot take (the pelvis sinking past `maxDrop`, a walking leg
+ * stretched straight before its toes leave) is shortened, the steps quickened.
  */
-export function gaitFor(body: Body, speed: number, style: GaitStyle = GAIT_STYLE): Gait {
+/** The terms of a gait's arms: what the muscles that drive them set (the rest of a gait is the legs' and the trunk's). */
+const ARM_TERMS = ['armFollow', 'armLag', 'arm', 'armBias', 'armOut', 'armIn', 'armLoop', 'elbow', 'elbowSnap', 'elbowLag', 'wristLag', 'wristFlick', 'shoulderGive'] as const;
+
+/**
+ * A run's arms held with so much effort (0: let go, as loose as the walk's; 1: driven, the run's own): each arm term
+ * `effort` of the way from the walk's to the run's. The rest of the run is its own.
+ */
+export function armsAt(run: GaitMode, walk: GaitMode, effort: number): GaitMode {
+    const e = clamp(effort, 0, 1);
+    if (e >= 1) return run;
+    const out = { ...run } as unknown as Record<string, unknown>;
+    const lerp = (a: unknown, b: unknown): unknown => (Array.isArray(a) ? a.map((x, i) => lerp(x, (b as number[])[i])) : (b as number) + ((a as number) - (b as number)) * e);
+    for (const k of ARM_TERMS) out[k] = lerp(run[k], walk[k]);
+    return out as unknown as GaitMode;
+}
+
+/** How hard a run drives its arms at a pace (m/s), 0 to 1, by its Froude number between the walk's top and `armDrive`. */
+export function armEffort(body: Body, speed: number, style: GaitStyle = GAIT_STYLE): number {
+    const froude = (speed * speed) / (GRAVITY * body.hipHeight);
+    return clamp((froude - style.runAt) / Math.max(1e-6, style.armDrive - style.runAt), 0, 1);
+}
+
+export function gaitFor(body: Body, speed: number, style: GaitStyle = GAIT_STYLE, kind?: GaitKind): Gait {
     if (!(speed > 0)) throw new Error('a gait needs a speed above zero');
     const L = body.hipHeight;
     const froude = (speed * speed) / (GRAVITY * L);
     const root = Math.sqrt(froude);
-    const mode = style.walk;
+    // The kind its speed asks for (or the one it is told).
+    const which: GaitKind = kind ?? (froude <= style.runAt ? 'walk' : 'run');
+    const mode = style[which];
+    const run = mode.support.how === 'bounce';
     const duty = clamp(mode.duty[0] - mode.duty[1] * root, 0.2, 0.75);
-    let step = speed / (Math.sqrt(GRAVITY / L) * (mode.rate[0] + mode.rate[1] * root));
+    const natural = speed / (Math.sqrt(GRAVITY / L) * (mode.rate[0] + mode.rate[1] * root));
     const standing = body.ref.hips[1];
-    let g!: Gait;
-    for (let pass = 0; pass < 24; pass++) {
+    /** The gait with a step so long, and whether the legs can take it: the hips no lower than the style lets them drop, no leg stretched. */
+    const withStep = (step: number): { g: Gait; ok: boolean } => {
         const swing = Math.asin(Math.min(0.95, step / (2 * body.leg)));
         const base: Gait = {
-            speed, mode, froude, step, stepTime: step / speed, stride: (2 * step) / speed, duty,
+            speed, kind: which, mode, run, froude, step, stepTime: step / speed, stride: (2 * step) / speed, duty,
             width: mode.width * L,
-            toeOut: Math.max(0, style.toeOut[0] - style.toeOut[1] * root) * DEG,
+            toeOut: style.toeOut * DEG,
             lead: 0, swing,
             strikePitch: Math.min(25 * DEG, mode.strike * swing),
+            toeOffPitch: (mode.support.how === 'bounce' ? mode.support.toeOff : 0) * DEG,
             drop: 0,
         };
         // The ankle strikes a share of the step ahead; the foot will stand flat farther on by what its heel rocker carries it.
         const lead = mode.lead * step - rolled(soleRoll(body), body.ankleHeight, base.strikePitch).along * Math.cos(base.toeOut);
-        const walk = vault(body, { ...base, lead }, style);
-        let low = Infinity;
-        for (let k = 0; k < 48; k++) low = Math.min(low, walk.height((k * base.stride) / 48));
-        g = { ...base, lead, drop: standing - low };
-        if (g.drop <= mode.maxDrop * body.leg && !walk.stretched()) break;
-        step *= 0.97;
-    }
-    return g;
+        let low: number, sound = true;
+        if (run) low = lowest(body, { ...base, lead }, style);
+        else {
+            const walk = vault(body, { ...base, lead }, style);
+            low = Infinity;
+            for (let k = 0; k < 48; k++) low = Math.min(low, walk.height((k * base.stride) / 48));
+            sound = !walk.stretched();
+        }
+        const g: Gait = { ...base, lead, drop: standing - low };
+        return { g, ok: g.drop <= mode.maxDrop * body.leg && sound };
+    };
+    // Its own step where the legs can take it; else the longest they can (found to a hair, so that a pace a little
+    // slower asks for a step a little shorter, never a jump), down to half of its own.
+    const own = withStep(natural);
+    if (own.ok) return own.g;
+    let lo = 0.5 * natural, hi = natural;
+    if (!withStep(lo).ok) return withStep(lo).g;
+    for (let k = 0; k < 20; k++) { const mid = (lo + hi) / 2; if (withStep(mid).ok) lo = mid; else hi = mid; }
+    return withStep(lo).g;
 }
 
 /** What a foot is doing at an instant of a gait: for carrying the gait onto other footfalls (stride.ts). */
@@ -907,17 +1092,27 @@ export interface GaitPose extends GaitFrame {
 
 /**
  * A gait as a pose at any time: time 0 is the left heel's strike, and the gait repeats every
- * stride, one stride's length further on.
+ * stride, one stride's length further on. `count`: how finely a gait that flies looks for the
+ * height its legs still reach the ground from.
  */
-export function gaitPoser(body: Body, g: Gait, style: GaitStyle = GAIT_STYLE): (t: number) => GaitPose {
+export function gaitPoser(body: Body, g: Gait, style: GaitStyle = GAIT_STYLE, count = 64): (t: number) => GaitPose {
     const mode = g.mode;
     const { left, up, fwd } = body;
     const pelvis = pelvisModel(body, g, style);
     const root = Math.sqrt(g.froude);
 
-    // The hips' height, from the knee of the leg that carries it.
-    const walk = vault(body, g, style);
-    const heightAt = walk.height;
+    // The hips' height. A gait that vaults has it from the knee of the leg that carries it; one
+    // that bounces rises and falls as the floor's push and gravity make it, as high as its legs
+    // still reach the ground at these instants.
+    const walk = g.run ? null : vault(body, g, style);
+    let heightAt: (t: number) => number;
+    if (walk) heightAt = walk.height;
+    else {
+        const rise = (t: number) => bounce(g, t - Math.floor(t / g.stepTime + 1e-9) * g.stepTime);
+        const top = reachModel(body, g, style);
+        const base = leastOver((t) => top(t) - rise(t), g.stride, count);
+        heightAt = (t) => base + rise(t);
+    }
     // A swinging foot hangs from its shin: how far that leans, from the hip and the ankle.
     const shin: Lean = (i, at, ankle) => {
         const q = pelvis(at);
@@ -925,7 +1120,7 @@ export function gaitPoser(body: Body, g: Gait, style: GaitStyle = GAIT_STYLE): (
         const span = Math.min(body.leg, Math.hypot(d[0], d[1], d[2]));
         return Math.atan2(dot(d, footHeading(body, g, i)), dot(d, up)) + Math.asin(clamp((body.thigh * Math.sin(kneeFor(body, span))) / span, -1, 1));
     };
-    const foot = footModel(body, g, style, hipsOver(body, g, style), walk.roll, shin);
+    const foot = footModel(body, g, style, hipsOver(body, g, style), walk?.roll, shin);
 
     /** How far a foot in the air is turned out, by how far through its swing it is: out and back once, the smoothest way from rest to rest. */
     const swingTurn = viaCurve(0, 0, 0, 0, 0, 0, clamp(mode.swingTurn[1], 0.1, 0.9), mode.swingTurn[0] * DEG);
@@ -937,15 +1132,15 @@ export function gaitPoser(body: Body, g: Gait, style: GaitStyle = GAIT_STYLE): (
         const ankles: V3[] = [], stance: boolean[] = [], pivots: (V3 | null)[] = [], short: number[] = [], knees: number[] = [];
         const feet: FootTrace[] = [];
         // Both legs turn about the upright together (the one ahead toward the other, the one behind away from it).
-        const legTurned = mode.legTurn.size * g.swing * wave(t / g.stride, mode.legTurn.at, mode.legTurn.third);
+        const legTurned = mode.legTurn.size * g.swing * wave(t / g.stride, mode.legTurn.at, mode.legTurn.third, style.thirdAt);
         const legTurn = axisAngle(up, legTurned);
 
         for (let i = 0; i < 2; i++) {
             const f = foot(i, t);
             const socket = add(hips, rotate(p.rot, sub(body.ref[`${LEG[i]}UpperLeg`], body.ref.hips)));
             // Two-bone IK: the knee in the plane of the hip-ankle line and the way the leg is turned (the foot's heading, turned with the legs).
-            // The knees are already where the hips' height put them.
-            const most = body.leg + 1e-6;
+            // A run holds each standing knee to its least bend; a walk's knees are already where the hips' height put them.
+            const most = (g.run ? (f.standing ? legSpan(body, f.flex) : 0.999 * body.leg) : body.leg) + 1e-6;
             const leg = legPose(body, socket, f.ankle, rotate(legTurn, f.heading), most);
             knees.push(leg.knee);
             world[`${LEG[i]}UpperLeg`] = leg.upper;
@@ -964,24 +1159,23 @@ export function gaitPoser(body: Body, g: Gait, style: GaitStyle = GAIT_STYLE): (
 
         // The chest turns its right shoulder forward as the left foot comes forward (against the pelvis), rolls a little with that, and leans with the speed.
         const lean = (Math.max(0, style.lean[0] + style.lean[1] * root) + mode.nod[0] * Math.cos(4 * Math.PI * (t / g.stride - mode.nod[1]))) * DEG;
-        const chestTurn = mode.chest.size * g.swing * wave(t / g.stride, mode.chest.at, mode.chest.third);
+        const chestTurn = mode.chest.size * g.swing * wave(t / g.stride, mode.chest.at, mode.chest.third, style.thirdAt);
         const against = qmul(axisAngle(up, chestTurn), axisAngle(fwd, mode.chestRoll * chestTurn));
         // It twists about its own length, then leans: a leaned chest that turned about the upright instead would swing round like a boom.
         const chest = qmul(axisAngle(left, lean), against);
         // The spine's bones go evenly from the pelvis' turn to the chest's.
         spine.forEach((r, j) => (world[r] = slerp(p.rot, chest, (j + 1) / spine.length)));
         // The chest keeps its own place to the side: the bones between it and the pelvis lean to join the swaying hips to it.
-        const sideOf = (w?: Wave) => (w ? w.size * body.hipHeight * wave(t / g.stride, w.at, w.third) : null);
+        const sideOf = (w?: Wave) => (w ? w.size * body.hipHeight * wave(t / g.stride, w.at, w.third, style.thirdAt) : null);
         const chestAt = leanToJoin(body, world, spine.length ? add(hips, rotate(p.rot, sub(body.ref[spine[0]], body.ref.hips))) : hips, spine, sideOf(mode.chestSway));
         const top = spine.length ? chest : p.rot;
-        // The head stays level and looks ahead, giving a little to the chest's turn and to its list. On its own it nods with each step and tilts once a stride.
-        const nodding = mode.headNod[0] * DEG * Math.cos(4 * Math.PI * (t / g.stride - mode.headNod[1]));
+        // The head stays level and looks ahead, giving a little to the chest's turn and to its list. On its own it may tilt once a stride.
         const tilting = mode.headTilt[0] * DEG * Math.cos(2 * Math.PI * (t / g.stride - mode.headTilt[1]));
         const chestList = Math.asin(clamp(dot(rotate(chest, left), up), -1, 1));
         const gaze = axisAngle(up, mode.headFollow * chestTurn), listing = mode.headRoll * chestList;
-        // The neck goes between the chest and the head as it would be without its nod and its tilt: those are the head's own, on top of the neck.
+        // The neck goes between the chest and the head as it would be without its tilt: that is the head's own, on top of the neck.
         world.neck = slerp(top, qmul(axisAngle(left, mode.headLean * lean), qmul(gaze, axisAngle(fwd, listing))), mode.neck);
-        world.head = qmul(axisAngle(left, mode.headLean * lean + nodding), qmul(gaze, axisAngle(fwd, listing + tilting)));
+        world.head = qmul(axisAngle(left, mode.headLean * lean), qmul(gaze, axisAngle(fwd, listing + tilting)));
         // The head keeps its own place to the side too: the neck leans to join the chest to it.
         if (mode.headSway && body.roles.neck !== undefined && body.roles.head !== undefined) {
             const under = spine.length ? spine[spine.length - 1] : 'hips';
@@ -1036,14 +1230,3 @@ export function gaitPoser(body: Body, g: Gait, style: GaitStyle = GAIT_STYLE): (
     };
 }
 
-/**
- * One stride of a gait as `count` instants (the first at the left heel's strike; the
- * stride closes on itself: the instant after the last is the first, one stride on).
- */
-export function gaitCycle(body: Body, g: Gait, style: GaitStyle = GAIT_STYLE, count = 64): GaitFrame[] {
-    const pose = gaitPoser(body, g, style);
-    return Array.from({ length: count }, (_, k) => {
-        const { feet: _feet, legTurn: _legTurn, ...frame } = pose((k * g.stride) / count);
-        return frame;
-    });
-}

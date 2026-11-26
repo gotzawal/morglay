@@ -150,7 +150,7 @@ export function underside(points: [number, number][], grain: number): [number, n
  * ankle's height (x along the foot from the ankle, z over the floor). Null when the feet
  * move no vertices.
  */
-export function soleFromMesh(points: SkinnedPoints, skeleton: SkeletonBone[], body: Body, restAnkles: [V3, V3]): { sole: Pick<Sole, 'heel' | 'tip' | 'outline'>; floor: number } | null {
+export function soleFromMesh(points: SkinnedPoints, skeleton: SkeletonBone[], body: Body, restAnkles: [V3, V3]): { sole: Pick<Sole, 'heel' | 'tip' | 'half' | 'outline'>; floor: number } | null {
     const under = (root: number) => {
         const set = new Set<number>([root]);
         for (let grown = true; grown; ) {
@@ -174,12 +174,15 @@ export function soleFromMesh(points: SkinnedPoints, skeleton: SkeletonBone[], bo
         const own = mine.filter((m) => m.foot === foot).map((m): [number, number] => [dot([m.p[0] - restAnkles[foot][0], 0, m.p[2] - restAnkles[foot][2]], f), dot(m.p, body.up) - floor]);
         for (const p of own) if (p[1] <= body.ankleHeight) side.push(p);
         const along = own.filter((p) => p[1] <= 0.02).map((p) => p[0]);
-        return along.length ? { heel: Math.min(...along), tip: Math.max(...along) } : null;
+        // (Across the foot: what touches the floor, from one side to the other.)
+        const n: V3 = [-f[2], 0, f[0]];
+        const across = mine.filter((m) => m.foot === foot && dot(m.p, body.up) - floor <= 0.02).map((m) => dot([m.p[0] - restAnkles[foot][0], 0, m.p[2] - restAnkles[foot][2]], n));
+        return along.length ? { heel: Math.min(...along), tip: Math.max(...along), half: across.length ? (Math.max(...across) - Math.min(...across)) / 2 : 0 } : null;
     });
-    const found = ends.filter((e): e is { heel: number; tip: number } => !!e);
+    const found = ends.filter((e): e is { heel: number; tip: number; half: number } => !!e);
     if (!found.length) return null;
     return {
-        sole: { heel: found.reduce((s, e) => s + e.heel, 0) / found.length, tip: found.reduce((s, e) => s + e.tip, 0) / found.length, outline: underside(side, 0.002 * body.hipHeight) },
+        sole: { heel: found.reduce((s, e) => s + e.heel, 0) / found.length, tip: found.reduce((s, e) => s + e.tip, 0) / found.length, half: found.reduce((s, e) => s + e.half, 0) / found.length, outline: underside(side, 0.002 * body.hipHeight) },
         floor,
     };
 }

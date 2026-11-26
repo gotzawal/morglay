@@ -10,8 +10,6 @@ export const GRAVITY = 9.81;
 
 export const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
 export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-/** The fractional part, in [0, 1). */
-export const frac = (x: number) => x - Math.floor(x);
 export const DEG = Math.PI / 180;
 
 /**
@@ -46,20 +44,6 @@ export function bridge(p0: number, v0: number, a0: number, p1: number, v1: numbe
         p0 * (1 - 10 * x3 + 15 * x4 - 6 * x5) + v0 * (x - 6 * x3 + 8 * x4 - 3 * x5) + a0 * (0.5 * x2 - 1.5 * x3 + 1.5 * x4 - 0.5 * x5) +
         p1 * (10 * x3 - 15 * x4 + 6 * x5) + v1 * (-4 * x3 + 7 * x4 - 3 * x5) + a1 * (0.5 * x3 - x4 + 0.5 * x5)
     );
-}
-
-/**
- * The minimum-jerk move between two states with speeds given at both ends and the pushes
- * there left free (the jerk, not the acceleration, is zero at the ends): the value at u in
- * [0, 1]. It is already speeding up as it starts and still slowing as it arrives, so it
- * spreads its speed more evenly than `quintic` does: a foot pushed off the floor and
- * stopped by it. `v0` and `v1` are speeds per unit of u.
- */
-export function freeQuintic(p0: number, v0: number, p1: number, v1: number, u: number): number {
-    const x = clamp(u, 0, 1), d = p1 - p0;
-    const a5 = (2 * d - v0 - v1) / 2, a4 = -2.5 * a5, a2 = 2.5 * d - 1.75 * v0 - 0.75 * v1;
-    const x2 = x * x;
-    return p0 + v0 * x + a2 * x2 + a4 * x2 * x2 + a5 * x2 * x2 * x;
 }
 
 /** Solves a small set of linear equations: each row its coefficients, then its right side. Returns the unknowns. */
@@ -153,11 +137,11 @@ export function viaCurve(p0: number, v0: number, a0: number, p1: number, v1: num
 /**
  * A wave once a cycle, with (where asked) its third harmonic riding on it. `phase` counts
  * cycles; the wave is at its most `at` of a cycle on. `third`: the faster wave's size as a
- * share of the first, and when it peaks. One wave alone rises and falls evenly; the third
- * makes it rise fast and come back slowly, or flattens its top.
+ * share of the first, peaking `thirdAt` of a cycle on. One wave alone rises and falls evenly;
+ * the third makes it rise fast and come back slowly, or flattens its top.
  */
-export const wave = (phase: number, at: number, third: readonly [number, number] = [0, 0]): number =>
-    Math.cos(2 * Math.PI * (phase - at)) + third[0] * Math.cos(6 * Math.PI * (phase - third[1]));
+export const wave = (phase: number, at: number, third = 0, thirdAt = 0): number =>
+    Math.cos(2 * Math.PI * (phase - at)) + third * Math.cos(6 * Math.PI * (phase - thirdAt));
 
 /** The rotation by `angle` (radians) about a unit axis. */
 export function axisAngle(axis: V3, angle: number): Quat {
@@ -196,19 +180,3 @@ export function slerp(a: Quat, b: Quat, t: number): Quat {
     return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
 }
 
-/**
- * A cycle of samples smoothed around the cycle: each value becomes the Hann-weighted
- * mean of its neighbours `half` samples to each side, the ends wrapping.
- */
-export function smoothCycle(values: number[], half: number): number[] {
-    const n = values.length;
-    if (half < 1 || n < 3) return [...values];
-    const w: number[] = [];
-    for (let j = -half; j <= half; j++) w.push(0.5 * (1 + Math.cos((Math.PI * j) / (half + 1))));
-    const total = w.reduce((a, b) => a + b, 0);
-    return values.map((_, i) => {
-        let sum = 0;
-        for (let j = -half; j <= half; j++) sum += w[j + half] * values[(((i + j) % n) + n) % n];
-        return sum / total;
-    });
-}

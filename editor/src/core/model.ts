@@ -541,11 +541,50 @@ export type PlayerView = PlayerDoc['view'];
 export const ANIMATION_MODES = ['idle', 'walk', 'run', 'jump', 'fall'] as const;
 const modeClip = (mode: string) => text('', 200, { title: mode[0].toUpperCase() + mode.slice(1), description: `Clip while the character is in its ${mode} mode; empty picks one by its name.` });
 
+/** An asset id a clip source names, or nothing. */
+const sourceAsset = (description: string) => z.string().min(1).max(64).optional().catch(undefined).meta({ description, kind: 'asset' });
+
+/**
+ * A clip the model gets without its file changing (core/clipSources.ts):
+ * a walk along a path asset, made for the model's own body, or a clip of
+ * a clip file (an Animation asset) retargeted onto its bones. The editor
+ * and Play show the model with these clips added, made when it loads.
+ */
+export const ClipSource = z.object({
+    name: text('', 200, { description: 'The clip\'s name, as Clip and the modes pick it.' }),
+    clip: sourceAsset('A clip file (an Animation asset: a GLB of a skeleton and clips): its clip named Take is retargeted onto the model.'),
+    take: z.string().max(200).optional().catch(undefined).meta({ description: 'The clip of the clip file to take, by name; none takes its first.' }),
+    walk: sourceAsset('A path asset (a .path.json file: where the body goes and when): a walk along it is made for the model\'s body.'),
+});
+export type ClipSourceDoc = z.output<typeof ClipSource>;
+
+/**
+ * The clip sources of an animation, repaired: each an object with a walk
+ * or a clip file, a name unique among them (Walk, or the clip it takes,
+ * when it has none), at most 32.
+ */
+function tidySources(list: unknown): ClipSourceDoc[] {
+    const out: ClipSourceDoc[] = [];
+    const taken = new Set<string>();
+    for (const raw of Array.isArray(list) ? list : []) {
+        if (!raw || typeof raw !== 'object' || out.length >= 32) continue;
+        const s = ClipSource.parse(raw);
+        if (!s.walk && !s.clip) continue;
+        const base = s.name.trim() || (s.walk ? 'Walk' : s.take?.trim() || 'Clip');
+        let name = base;
+        for (let k = 2; taken.has(name); k++) name = `${base} (${k})`;
+        taken.add(name);
+        out.push({ name, ...(s.walk ? { walk: s.walk } : { clip: s.clip, ...(s.take ? { take: s.take } : {}) }) });
+    }
+    return out;
+}
+
 /**
  * Skeletal animation of an imported model (see play/animation.ts): the clip
  * it plays, in the editor too while previewed, and on a character the clip
- * of each of its modes, crossfaded as the mode changes. Scripts play clips
- * with this.animator.
+ * of each of its modes, crossfaded as the mode changes. Clips come from the
+ * model's file and from `sources`, made for it when it loads. Scripts play
+ * clips with this.animator.
  */
 export const Animation = z.object({
     clip: text('', 200, { description: 'Clip it plays; empty plays the first.' }),
@@ -553,8 +592,19 @@ export const Animation = z.object({
     fade: num(0.25, 0, 5, { step: 0.05, title: 'Crossfade', description: 'Seconds one clip takes to blend into the next.' }),
     preview: bool(true, { description: 'Plays in the editor too, not only in Play.' }),
     ...Object.fromEntries(ANIMATION_MODES.map((m) => [m, modeClip(m)])) as Record<(typeof ANIMATION_MODES)[number], ReturnType<typeof modeClip>>,
+    sources: z.array(ClipSource).max(32).overwrite(tidySources).catch((c) => tidySources(c?.value)).meta({
+        description: 'Clips made for the model when it loads, besides its file\'s own: each a name and either walk (a path asset) or clip (a clip file asset) with take (its clip). The model\'s file is not changed.',
+    }),
 });
 export type AnimationDoc = z.output<typeof Animation>;
+
+/** An animation without one of its clip sources: the clip and the modes that played its clip go back to their defaults. */
+export function withoutClipSource(anim: AnimationDoc, source: ClipSourceDoc): AnimationDoc {
+    const out: AnimationDoc = { ...anim, sources: anim.sources.filter((x) => x !== source) };
+    if (out.clip === source.name) out.clip = '';
+    for (const m of ANIMATION_MODES) if (out[m] === source.name) out[m] = '';
+    return out;
+}
 
 // ------------------------------------------- motion on top of the clip (springs, face)
 

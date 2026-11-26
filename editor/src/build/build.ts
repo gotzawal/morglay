@@ -176,6 +176,8 @@ export async function buildGame(source: SceneDoc, opts: BuildOptions, log: (text
             if (e?.name === 'AbortError') throw e;
             return null;
         });
+    // A model whose animation makes clips from sources (a walk along a path) ships as its file: the game makes them from it as the editor does.
+    const withClips = new Set(doc.nodes.filter((n) => n.model && n.animation?.sources.length).map((n) => n.model!.asset));
     for (const asset of doc.assets) {
         signal?.throwIfAborted();
         const blob = await getAssetBlob(asset.id);
@@ -208,7 +210,7 @@ export async function buildGame(source: SceneDoc, opts: BuildOptions, log: (text
         if (asset.kind === 'texture' && asset.name.toLowerCase().endsWith('.ktx2')) uses.ktx2 = true;
         if (asset.kind === 'model') {
             // The copy when a game is better off with it (KTX2 textures, or smaller), else the file.
-            const copy = textures ? await copyOf(asset, 'model') : null;
+            const copy = textures && !withClips.has(asset.id) ? await copyOf(asset, 'model') : null;
             const shipped = copy && shipsCopy(copy, asset) ? copy : null;
             if (shipped) {
                 const path = derivedPath(asset, 'model');

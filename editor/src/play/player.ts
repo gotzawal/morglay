@@ -123,6 +123,8 @@ export class Player extends Emitter<PlayerEvents> implements PlayApi, AgentHost 
     private world: Physics | null = null;
     /** The animated models of the session (play/animation.ts). */
     private animations: Animations | null = null;
+    /** Play waits for the clips of models' animation sources once, then starts with what there is. */
+    private clipsWaited = false;
     /** The sounds of the session (play/audio.ts). */
     private audio: AudioSystem | null = null;
     /** Play without sound (the assistant's play tests). */
@@ -191,6 +193,16 @@ export class Player extends Emitter<PlayerEvents> implements PlayApi, AgentHost 
         if (physicsLoaded() === undefined && usesPhysics(this.store.doc)) {
             const run = this.runs;
             void loadPhysics().then(() => run === this.runs && this.state === 'stopped' && this.play());
+            return;
+        }
+        // So does a model whose animation's clips are still being made (a walk along a path): once.
+        if (!this.clipsWaited && this.sync.clipsPending()) {
+            const run = this.runs;
+            this.clipsWaited = true;
+            void this.sync.whenLoaded().then(() => {
+                if (run === this.runs && this.state === 'stopped') this.play();
+                this.clipsWaited = false;
+            });
             return;
         }
         this.checkpointState = this.store.checkpoint();

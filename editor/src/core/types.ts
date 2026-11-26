@@ -12,7 +12,7 @@ export type { Vec3 };
 
 // Components and settings defined by their schemas (core/model.ts).
 export type {
-    AlphaMode, AnimationDoc, AnimeDoc, AnimeKind, AudioSourceDoc, BodyDoc, BodyType, CameraDoc, CharacterDoc, EnvironmentDoc, GeometryDoc, GeometryType, GIDoc, GrassDoc, InstancingDoc, LightDoc, LightType, RainDoc,
+    AlphaMode, AnimationDoc, AnimeDoc, AnimeKind, AudioSourceDoc, BodyDoc, BodyType, CameraDoc, CharacterDoc, ClipSourceDoc, EnvironmentDoc, GeometryDoc, GeometryType, GIDoc, GrassDoc, InstancingDoc, LightDoc, LightType, RainDoc,
     MaterialDoc, MaterialOverride, MaterialType, MeshDoc, MirrorDoc, ModelDoc, MotionDoc, ParticleShape, ParticlesDoc, PartOverride, PlayerDoc, PlayerView, ScatterDoc, ScatterSourceDoc, SkyType,
     SlotShading, SpecsDoc, TerrainDoc, TerrainLayerDoc, TreeDoc,
 } from './model';
@@ -107,11 +107,14 @@ export interface PrefabDoc {
 }
 
 /**
- * 'audio' is a sound file (Audio components, scripts). 'image' is a picture
- * used for planning (concepts, paintovers, captures, attachments), 'data' a
- * JSON blob (scene snapshots). Neither of those two is used by the game.
+ * 'audio' is a sound file (Audio components, scripts). 'clip' is a GLB of a
+ * skeleton and its animations and no mesh, a motion that models play
+ * (AnimationDoc.sources). 'image' is a picture used for planning (concepts,
+ * paintovers, captures, attachments), never used by the game. 'data' is a
+ * file of data: a scene snapshot (planning), a terrain's heights or paint,
+ * or a path a walk follows (core/motionPath.ts, named <name>.path.json).
  */
-export type AssetKind = 'model' | 'texture' | 'audio' | 'image' | 'data';
+export type AssetKind = 'model' | 'texture' | 'audio' | 'clip' | 'image' | 'data';
 
 /** Where a downloaded asset came from (the Library, or a URL): for the credits, and to reuse it instead of downloading it again. */
 export interface AssetSource {

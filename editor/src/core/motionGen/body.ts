@@ -21,6 +21,8 @@ export interface Sole {
     ball: number;
     /** The front end. */
     tip: number;
+    /** Half its width, from the line of the foot out to each side. */
+    half: number;
     /**
      * The sole seen from the side, where it is known (the mesh: motionGen/mesh.ts): the points
      * a flat floor touches as the foot rolls on it, from behind the heel to the front, each
@@ -63,14 +65,9 @@ export interface Body {
     leg: number;
     /** The ankle over the floor standing. */
     ankleHeight: number;
-    /** Half the distance between the hip sockets, and between the shoulder joints. */
-    hipHalf: number;
-    shoulderHalf: number;
     /** Each foot's heading at rest, as a turn about up from forward (positive toward the left): left foot, right foot. */
     footYaw: [number, number];
     sole: Sole;
-    upperArm: number;
-    forearm: number;
     /** Toes that do not bend (a stiff boot): the foot rolls over its tip instead of its ball. */
     stiffToes: boolean;
     joints: Joints;
@@ -157,6 +154,8 @@ export function measureBody(skeleton: SkeletonBone[], options: BodyOptions = {})
         ball,
         heel: options.sole?.heel ?? -0.48 * ball,
         tip: options.sole?.tip ?? 1.6 * ball,
+        // (A foot is about a third as wide as it is long.)
+        half: options.sole?.half ?? 0.18 * ((options.sole?.tip ?? 1.6 * ball) - (options.sole?.heel ?? -0.48 * ball)),
         ...(options.sole?.outline && options.sole.outline.length >= 2 ? { outline: options.sole.outline } : {}),
     };
 
@@ -165,12 +164,8 @@ export function measureBody(skeleton: SkeletonBone[], options: BodyOptions = {})
     return {
         left, up, fwd, roles, ref, floor,
         hipHeight, thigh, shin, leg: thigh + shin, ankleHeight,
-        hipHalf: Math.abs(dot(sub(refPose[roles.leftUpperLeg], refPose[roles.rightUpperLeg]), left)) / 2,
-        shoulderHalf: Math.abs(dot(sub(refPose[roles.leftUpperArm], refPose[roles.rightUpperArm]), left)) / 2,
         footYaw: [hl.yaw, hr.yaw],
         sole,
-        upperArm: mean('leftUpperArm', 'rightUpperArm', (r) => dist(at(r), at(r.replace('Upper', 'Lower')))),
-        forearm: mean('leftLowerArm', 'rightLowerArm', (r) => dist(at(r), at(r.replace('LowerArm', 'Hand')))),
         stiffToes: options.stiffToes ?? false,
         joints: { ...HUMAN_JOINTS, ...options.joints },
         massHeight: options.massHeight ?? 1.06,

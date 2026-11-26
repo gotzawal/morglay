@@ -51,7 +51,7 @@ const objectFields = {
         type: ['object', 'null'],
     },
     animation: {
-        ...toolSchema(Animation, 'Skeletal animation of an imported model with clips (list_model_parts lists them): the clip it plays, its speed and crossfade, and on a character the clip of each mode (idle, walk, run, jump, fall; empty picks a clip named for the mode). Scripts play clips with this.animator. null removes it.'),
+        ...toolSchema(Animation, 'Skeletal animation of an imported model (list_model_parts lists its clips): the clip it plays, its speed and crossfade, on a character the clip of each mode (idle, walk, run, jump, fall; empty picks a clip named for the mode), and sources: clips made for it as it loads without changing its file (a walk along a path asset, a clip of a clip asset). Scripts play clips with this.animator. null removes it.'),
         type: ['object', 'null'],
     },
     body: {
@@ -576,7 +576,10 @@ function nodeSummary(doc: SceneDoc, n: NodeDoc): Json {
     }
     if (n.animation) {
         const a = n.animation;
-        out.animation = { clip: a.clip || 'first', ...(a.speed !== 1 ? { speed: a.speed } : {}), ...Object.fromEntries(ANIMATION_MODES.filter((m) => a[m]).map((m) => [m, a[m]])) };
+        out.animation = {
+            clip: a.clip || 'first', ...(a.speed !== 1 ? { speed: a.speed } : {}), ...Object.fromEntries(ANIMATION_MODES.filter((m) => a[m]).map((m) => [m, a[m]])),
+            ...(a.sources.length ? { sources: a.sources.map((x) => ({ name: x.name, ...(x.walk ? { walk: x.walk } : { clip: x.clip, ...(x.take ? { take: x.take } : {}) }) })) } : {}),
+        };
     }
     if (n.body) {
         const b = n.body;

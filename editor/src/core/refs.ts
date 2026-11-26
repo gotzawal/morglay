@@ -4,6 +4,7 @@
 // must carry, whether something is in use, and what deleting it clears.
 
 import { ANIME_MAP_KEYS, animeMapRole, type AnimeMapKey } from './anime';
+import { withoutClipSource } from './model';
 import type { MaterialDoc, ParamValue, SceneDoc, TextureRole } from './types';
 
 export type RefKind = 'asset' | 'shader' | 'script';
@@ -107,6 +108,11 @@ export function refs(doc: SceneDoc): Ref[] {
         if (grass?.windMap) out.push({ kind: 'asset', id: grass.windMap, at: 'object', role: 'data', drop: () => (grass.windMap = null) });
         const audio = n.audio;
         if (audio?.clip) out.push({ kind: 'asset', id: audio.clip, at: 'object', role: 'audio', drop: () => (audio.clip = null) });
+        // The paths and clip files an animation's clips are made from ship as they are (no role: no compressed copies).
+        for (const source of n.animation?.sources ?? []) {
+            const id = source.walk ?? source.clip;
+            if (id) out.push({ kind: 'asset', id, at: 'object', drop: () => n.animation && (n.animation = withoutClipSource(n.animation, source)) });
+        }
         // A terrain's heights and paint ship as they are (no role: no compressed copies); its layers show swatches.
         const terrain = n.terrain;
         if (terrain?.heightmap) out.push({ kind: 'asset', id: terrain.heightmap, at: 'object', drop: () => (terrain.heightmap = null) });
